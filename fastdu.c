@@ -451,6 +451,50 @@ typedef struct {
     char *path; // abs
 } DirView;
 
+// Navigation stack to restore selection/top when returning to parent
+typedef struct {
+    char *parent_path;
+    char *child_path; // path we entered from parent
+    size_t selected;
+    int top;
+} NavState;
+
+typedef struct {
+    NavState *v;
+    size_t n;
+    size_t cap;
+} NavStack;
+
+static void navstack_init(NavStack *s) { s->v = NULL; s->n = s->cap = 0; }
+static void navstack_free(NavStack *s) {
+    for (size_t i = 0; i < s->n; i++) { free(s->v[i].parent_path); free(s->v[i].child_path); }
+    free(s->v); s->v = NULL; s->n = s->cap = 0;
+}
+static void navstack_push(NavStack *s, const char *parent_path, const char *child_path, size_t selected, int top) {
+    if (s->n == s->cap) { size_t nc = s->cap ? s->cap * 2 : 32; void *nv = realloc(s->v, nc * sizeof(NavState)); if (!nv) return; s->v = (NavState*)nv; s->cap = nc; }
+    NavState *st = &s->v[s->n++]; st->parent_path = xstrdup(parent_path); st->child_path = xstrdup(child_path); st->selected = selected; st->top = top;
+}
+static int navstack_pop(NavStack *s, NavState *out) {
+    if (s->n == 0) return 0;
+    *out = s->v[--s->n];
+    return 1;
+}
+
+// Mark set for selecting multiple items
+typedef struct {
+    char **paths;
+    size_t n;
+    size_t cap;
+} MarkSet;
+
+static void markset_init(MarkSet *m) { m->paths = NULL; m->n = m->cap = 0; }
+static void markset_free(MarkSet *m) { for (size_t i=0;i<m->n;i++) free(m->paths[i]); free(m->paths); m->paths=NULL; m->n=m->cap=0; }
+static int markset_index_of(MarkSet *m, const char *p) { for (size_t i=0;i<m->n;i++) if (strcmp(m->paths[i], p)==0) return (int)i; return -1; }
+static int markset_has(MarkSet *m, const char *p) { return markset_index_of(m,p) >= 0; }
+static void markset_add(MarkSet *m, const char *p) { if (markset_has(m,p)) return; if (m->n==m->cap){ size_t nc=m->cap?m->cap*2:64; void*nv=realloc(m->paths,nc*sizeof(char*)); if(!nv) return; m->paths=(char**)nv; m->cap=nc;} m->paths[m->n++]=xstrdup(p);} 
+static void markset_remove(MarkSet *m, const char *p) { int i=markset_index_of(m,p); if(i<0) return; free(m->paths[i]); if((size_t)i<m->n-1) memmove(&m->paths[i], &m->paths[i+1], (m->n-i-1)*sizeof(char*)); m->n--; }
+static void markset_remove_prefix(MarkSet *m, const char *prefix) { size_t w=0; size_t lp=strlen(prefix); for(size_t i=0;i<m->n;i++){ if (strncmp(m->paths[i], prefix, lp)==0) { free(m->paths[i]); continue; } if (w!=i) m->paths[w]=m->paths[i]; w++; } m->n=w; }
+
 static void view_free(DirView *dv) {
     for (size_t i = 0; i < dv->n; i++) {
         free(dv->v[i].name);
@@ -542,6 +586,7 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
 // ------------------------------
 // TUI
 // ------------------------------
+static MarkSet g_marks; // global marks set for UI
 static void draw_header(const char *root, const char *cur) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
     attron(COLOR_PAIR(1));
@@ -564,7 +609,7 @@ static void draw_header(const char *root, const char *cur) {
     char totalbuf[64];
     human_size((unsigned long long)g_last_bytes, totalbuf, sizeof(totalbuf));
     char footer[256];
-    snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s ", (unsigned long long)g_last_files, totalbuf);
+    snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu ", (unsigned long long)g_last_files, totalbuf, g_marks.n);
     mvaddnstr(rows-2, 0, footer, cols-1);
     attroff(COLOR_PAIR(1));
 }
@@ -582,12 +627,15 @@ static int compute_size_col_width(const DirView *dv) {
     return w;
 }
 
+
 static void draw_list(const DirView *dv, int top) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
     int y = 1; // below header
     int list_rows = rows - 3; // header + footer
     int sizew = compute_size_col_width(dv);
-    int type_col = 1 + sizew + 1; // leading space + size + space
+    int mark_col = 0; // mark column at 0
+    int size_col = 2; // mark + space
+    int type_col = size_col + sizew + 1; // size + space
     int name_col = type_col + 2; // type char + space
 
     for (int i = 0; i < list_rows; i++) {
@@ -608,9 +656,13 @@ static void draw_list(const DirView *dv, int top) {
         // To ensure right alignment, compute padding
         int l = (int)strlen(sizebuf);
         int pad = sizew - l; if (pad < 0) pad = 0;
-        // size column at x=1
-        if (pad) { for (int k = 0; k < pad; k++) mvaddch(y + i, 1 + k, ' '); }
-        mvaddnstr(y + i, 1 + pad, sizebuf, sizew - pad);
+        // mark column
+        char mchar = markset_has(&g_marks, ve->abs_path) ? '*' : ' ';
+        mvaddch(y + i, mark_col, mchar);
+        mvaddch(y + i, mark_col + 1, ' ');
+        // size column at x=size_col
+        if (pad) { for (int k = 0; k < pad; k++) mvaddch(y + i, size_col + k, ' '); }
+        mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
         // type
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
         // space after type
@@ -686,7 +738,8 @@ static void show_help(void) {
         "Actions:",
         "  r - rescan selected dir",
         "  R - rescan current dir",
-        "  d - delete file/dir (confirm)",
+        "  SPACE - mark/unmark file/dir",
+        "  d - delete marked (if any) else delete selected",
         "  o - toggle sort key (size/name)",
         "  s - toggle sort order (asc/desc)",
         "  q - quit",
@@ -757,6 +810,30 @@ static void cache_remove_prefix(Cache *c, const char *prefix) {
     }
     c->n = w;
     pthread_mutex_unlock(&c->mu);
+}
+
+static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta) {
+    if (delta <= 0) return;
+    time_t now = time(NULL);
+    char *p = xstrdup(abs_path);
+    if (!p) return;
+    // start from parent of abs_path
+    char *cur = get_parent(p);
+    free(p);
+    while (cur) {
+        CacheEntry *ce = cache_get(c, cur);
+        if (ce) {
+            if (ce->size > (unsigned long long)delta) ce->size -= (unsigned long long)delta; else ce->size = 0ULL;
+            ce->last_scan = now;
+            struct stat st;
+            if (stat(cur, &st) == 0) ce->dir_mtime = st.st_mtime;
+        }
+        if (strcmp(cur, root) == 0) break;
+        char *parent = get_parent(cur);
+        free(cur);
+        cur = parent;
+    }
+    if (cur) free(cur);
 }
 
 // ------------------------------
@@ -1064,7 +1141,9 @@ int main(int argc, char **argv) {
         refresh();
     }
 
-    DirView dv = {0};
+    DirView dv = (DirView){0};
+    NavStack nav; navstack_init(&nav);
+    markset_init(&g_marks);
     char current[PATH_MAX]; strncpy(current, root, sizeof(current)); current[sizeof(current)-1] = '\0';
 
     int top = 0;
@@ -1101,6 +1180,8 @@ int main(int argc, char **argv) {
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
                 if (ve->is_dir) {
+                    // Push parent nav state before changing directory
+                    navstack_push(&nav, current, ve->abs_path, dv.selected, top);
                     strncpy(current, ve->abs_path, sizeof(current)); current[sizeof(current)-1] = '\0';
                     view_free(&dv);
                     top = 0;
@@ -1121,11 +1202,27 @@ int main(int argc, char **argv) {
             if (strcmp(current, root) != 0) {
                 char *parent = get_parent(current);
                 if (parent) {
+                    // Move to parent
                     strncpy(current, parent, sizeof(current)); current[sizeof(current)-1] = '\0';
                     free(parent);
                     view_free(&dv);
-                    top = 0;
                     build_dir_view(current, root, &cache, &dv);
+                    // Restore selection/top from nav stack
+                    NavState st;
+                    if (navstack_pop(&nav, &st)) {
+                        // Prefer to locate the child path we came from
+                        size_t idx = st.selected; int found = 0;
+                        for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, st.child_path) == 0) { idx = i; found = 1; break; } }
+                        dv.selected = (dv.n > 0) ? (idx < dv.n ? idx : dv.n - 1) : 0;
+                        top = st.top;
+                        // Ensure visibility
+                        int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+                        if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                        if ((int)dv.selected < top) top = (int)dv.selected;
+                        free(st.parent_path); free(st.child_path);
+                    } else {
+                        top = 0;
+                    }
                 }
             }
         } else if (ch == 'r') {
@@ -1163,6 +1260,12 @@ int main(int argc, char **argv) {
             cache_save(root, &cache);
             view_free(&dv);
             build_dir_view(current, root, &cache, &dv);
+        } else if (ch == ' ') {
+            if (dv.n > 0) {
+                ViewEntry *ve = &dv.v[dv.selected];
+                if (markset_has(&g_marks, ve->abs_path)) markset_remove(&g_marks, ve->abs_path);
+                else markset_add(&g_marks, ve->abs_path);
+            }
         } else if (ch == 'o' || ch == 'O') {
             // toggle sort key (size/name), keep selection on same path
             if (dv.n > 0) {
@@ -1192,20 +1295,74 @@ int main(int argc, char **argv) {
                 g_sort_desc = !g_sort_desc;
             }
         } else if (ch == 'd') {
-            if (dv.n > 0) {
+            if (g_marks.n > 0) {
+                // Bulk delete marked
+                // Build list and sort by path length descending to delete deep paths first
+                size_t n = g_marks.n;
+                // Simple selection sort by length desc without extra alloc (work on a copy of pointers)
+                char **list = malloc(n * sizeof(char*));
+                for (size_t i=0;i<n;i++) list[i] = xstrdup(g_marks.paths[i]);
+                for (size_t i=0;i<n;i++) {
+                    size_t max_i = i; size_t max_l = strlen(list[i]);
+                    for (size_t j=i+1;j<n;j++){ size_t lj=strlen(list[j]); if (lj>max_l){ max_l=lj; max_i=j; }}
+                    if (max_i!=i){ char*tmp=list[i]; list[i]=list[max_i]; list[max_i]=tmp; }
+                }
+                // Confirm
+                size_t cnt_dir=0,cnt_file=0; for(size_t i=0;i<n;i++){ struct stat st; if (lstat(list[i],&st)==0){ if(S_ISDIR(st.st_mode)) cnt_dir++; else cnt_file++; }}
+                char prompt[256]; snprintf(prompt,sizeof(prompt),"Eliminare %zu elementi (%zu dir, %zu file)? [y/N] ", n, cnt_dir, cnt_file);
+                draw_status(prompt); refresh(); int chc=getch();
+                if (chc=='y'||chc=='Y'){
+                    for (size_t i=0;i<n;i++){
+                        const char *p = list[i];
+                        // compute delta
+                        unsigned long long delta=0ULL; struct stat st; int is_dir=0;
+                        if (lstat(p,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; CacheEntry*ce=cache_get(&cache,p); if(ce) delta=ce->size; else delta=scan_dir_recursive(p, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
+                        // delete
+                        if (remove_tree(p, cache_abs)==0){ if (is_dir) cache_remove_prefix(&cache,p); cache_adjust_ancestors_after_delta(&cache, root, p, (long long)delta); }
+                    }
+                    cache_save(root,&cache);
+                    // clear marks that were deleted
+                    for(size_t i=0;i<n;i++){ markset_remove(&g_marks, list[i]); free(list[i]); } free(list);
+                    // refresh view
+                    size_t old_index = dv.selected;
+                    view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                    if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
+                    draw_status("Eliminazione completata.");
+                } else {
+                    for(size_t i=0;i<n;i++) free(list[i]);
+                    free(list);
+                }
+            } else if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
                 if (confirm_delete_prompt(ve->name, ve->is_dir)) {
-                    // remember current index to keep position after deletion
+                    // Calcola delta prima di rimuovere
+                    struct stat st_before;
+                    int exists_before = (lstat(ve->abs_path, &st_before) == 0);
+                    unsigned long long delta = 0ULL;
+                    int is_dir = ve->is_dir;
+                    if (exists_before) {
+                        if (!is_dir && S_ISREG(st_before.st_mode)) {
+                            delta = (unsigned long long)st_before.st_size;
+                        } else if (is_dir) {
+                            CacheEntry *ce_del = cache_get(&cache, ve->abs_path);
+                            if (ce_del) delta = ce_del->size;
+                            else {
+                                // Stima dimensione della dir da eliminare (solo il subtree target)
+                                delta = scan_dir_recursive(ve->abs_path, root, cache_abs, &cache, NULL);
+                            }
+                        }
+                    }
+
+                    // Elimina
                     size_t old_index = dv.selected;
                     int rc = remove_tree(ve->abs_path, cache_abs);
                     if (rc == 0) {
-                        cache_remove_prefix(&cache, ve->abs_path);
-                        // rescan current directory to update sizes (parallel with progress)
-                        int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
-                        if (threads < 1) threads = 1; if (threads > 64) threads = 64;
-                        unsigned long long sz = scan_dir_parallel_deep(current, cache_abs, &cache, threads);
-                        (void)sz;
+                        if (is_dir) cache_remove_prefix(&cache, ve->abs_path);
+                        cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)delta);
                         cache_save(root, &cache);
+                        // unmark removed path and any subpaths
+                        markset_remove_prefix(&g_marks, ve->abs_path);
+                        // ricostruisci sola vista corrente (no rescan totale)
                         view_free(&dv);
                         build_dir_view(current, root, &cache, &dv);
                         if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
