@@ -1,0 +1,24 @@
+# Build artifacts
+fastdu
+*.o
+*.a
+*.so
+*.dylib
+
+# C/C tooling
+*.swp
+*.swo
+*.log
+*.out
+*.prof
+
+# OS / editor trash
+.DS_Store
+Thumbs.db
+
+# Project caches
+.fastdu_cache_v*
+.cache/
+
+# Build directories
+build/
