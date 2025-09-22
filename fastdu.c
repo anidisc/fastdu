@@ -90,6 +90,11 @@ static int starts_with(const char *s, const char *prefix) {
     return ls >= lp && memcmp(s, prefix, lp) == 0;
 }
 
+static const char *path_basename_const(const char *p) {
+    const char *slash = strrchr(p, '/');
+    return slash ? slash + 1 : p;
+}
+
 // Percent-encode tabs/newlines/percent for safe TSV cache
 static char *pct_encode(const char *s) {
     size_t cap = strlen(s) * 3 + 1; // worst case all encoded
@@ -739,6 +744,7 @@ static void show_help(void) {
         "  r - rescan selected dir",
         "  R - rescan current dir",
         "  SPACE - mark/unmark file/dir",
+        "  m - move marked to current directory",
         "  d - delete marked (if any) else delete selected",
         "  o - toggle sort key (size/name)",
         "  s - toggle sort order (asc/desc)",
@@ -834,6 +840,56 @@ static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const
         cur = parent;
     }
     if (cur) free(cur);
+}
+
+static void cache_add_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, unsigned long long delta) {
+    if (delta == 0) return;
+    time_t now = time(NULL);
+    char *p = xstrdup(abs_path);
+    if (!p) return;
+    char *cur = get_parent(p);
+    free(p);
+    while (cur) {
+        CacheEntry *ce = cache_get(c, cur);
+        if (ce) {
+            ce->size += delta;
+            ce->last_scan = now;
+            struct stat st; if (stat(cur, &st) == 0) ce->dir_mtime = st.st_mtime;
+        }
+        if (strcmp(cur, root) == 0) break;
+        char *parent = get_parent(cur);
+        free(cur);
+        cur = parent;
+    }
+    if (cur) free(cur);
+}
+
+static void cache_move_prefix(Cache *c, const char *root, const char *old_prefix, const char *new_prefix) {
+    size_t lold = strlen(old_prefix);
+    pthread_mutex_lock(&c->mu);
+    for (size_t i = 0; i < c->n; i++) {
+        if (starts_with(c->v[i].abs_path, old_prefix)) {
+            const char *suffix = c->v[i].abs_path + lold;
+            char *new_abs = NULL;
+            if (suffix[0] == '\0') {
+                new_abs = xstrdup(new_prefix);
+            } else if (suffix[0] == '/') {
+                const char *rest = suffix + 1;
+                new_abs = path_join(new_prefix, rest);
+            } else {
+                new_abs = path_join(new_prefix, suffix);
+            }
+            if (new_abs) {
+                free(c->v[i].abs_path);
+                c->v[i].abs_path = new_abs;
+                free(c->v[i].rel_path);
+                c->v[i].rel_path = relpath_from_abs(root, new_abs);
+                struct stat st; if (stat(new_abs, &st) == 0) c->v[i].dir_mtime = st.st_mtime;
+                c->v[i].last_scan = time(NULL);
+            }
+        }
+    }
+    pthread_mutex_unlock(&c->mu);
 }
 
 // ------------------------------
@@ -1293,6 +1349,51 @@ int main(int argc, char **argv) {
                 free(sel_path);
             } else {
                 g_sort_desc = !g_sort_desc;
+            }
+        } else if (ch == 'm') {
+            if (g_marks.n == 0) {
+                draw_status("Nessun elemento marcato.");
+            } else {
+                // Move marked to current directory, if valid
+                // Validate: destination must be different from each source parent, and not inside the source dir
+                size_t n = g_marks.n;
+                char **list = malloc(n * sizeof(char*));
+                for (size_t i=0;i<n;i++) list[i] = xstrdup(g_marks.paths[i]);
+                // Confirm move
+                char prompt[PATH_MAX+128]; snprintf(prompt, sizeof(prompt), "Spostare %zu elementi in '%s'? [y/N] ", n, current);
+                draw_status(prompt); refresh(); int chc=getch();
+                if (chc=='y'||chc=='Y'){
+                    for (size_t i=0;i<n;i++){
+                        const char *src = list[i];
+                        // disallow moving dir into its own subtree
+                        if (starts_with(current, src)) { continue; }
+                        const char *base = path_basename_const(src);
+                        char *dst = path_join(current, base);
+                        if (!dst) continue;
+                        // compute delta
+                        unsigned long long delta=0ULL; struct stat st; int is_dir=0;
+                        if (lstat(src,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; CacheEntry*ce=cache_get(&cache,src); if(ce) delta=ce->size; else delta=scan_dir_recursive(src, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
+                        // perform rename (move)
+                        if (rename(src, dst)==0){
+                            if (is_dir) cache_move_prefix(&cache, root, src, dst);
+                            cache_adjust_ancestors_after_delta(&cache, root, src, (long long)delta);
+                            cache_add_ancestors_after_delta(&cache, root, dst, delta);
+                            markset_remove_prefix(&g_marks, src);
+                        } else {
+                            // if rename failed, leave mark as is
+                        }
+                        free(dst);
+                    }
+                    cache_save(root,&cache);
+                    for(size_t i=0;i<n;i++) free(list[i]); free(list);
+                    // Refresh view
+                    size_t old_index = dv.selected;
+                    view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                    if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
+                    draw_status("Spostamento completato.");
+                } else {
+                    for(size_t i=0;i<n;i++) free(list[i]); free(list);
+                }
             }
         } else if (ch == 'd') {
             if (g_marks.n > 0) {
