@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <ctype.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -88,6 +89,23 @@ static char *get_parent(const char *path) {
 static int starts_with(const char *s, const char *prefix) {
     size_t ls = strlen(s), lp = strlen(prefix);
     return ls >= lp && memcmp(s, prefix, lp) == 0;
+}
+
+static int strcasestr_bool(const char *hay, const char *needle) {
+    if (!needle || needle[0] == '\0') return 1;
+    size_t hl = strlen(hay), nl = strlen(needle);
+    if (nl == 0) return 1;
+    if (nl > hl) return 0;
+    for (size_t i = 0; i + nl <= hl; i++) {
+        size_t j = 0;
+        for (; j < nl; j++) {
+            unsigned char a = (unsigned char)hay[i + j];
+            unsigned char b = (unsigned char)needle[j];
+            if (tolower(a) != tolower(b)) break;
+        }
+        if (j == nl) return 1;
+    }
+    return 0;
 }
 
 static const char *path_basename_const(const char *p) {
@@ -513,14 +531,32 @@ static void view_free(DirView *dv) {
 // Global sort mode
 typedef enum { SORT_SIZE = 0, SORT_NAME = 1 } SortMode;
 static SortMode g_sort_mode = SORT_SIZE;
-static int g_sort_desc = 1; // 1=desc, 0=asc
 static const char *sort_mode_label(void) {
-    static char buf[32];
+    return g_sort_mode == SORT_NAME ? "name" : "size";
+}
+
+// Sort order flag
+static int g_sort_desc = 1; // 1=desc, 0=asc
+// Return sort label with order
+static void sort_label_with_order(char *out, size_t outsz) {
     const char *key = (g_sort_mode == SORT_NAME) ? "name" : "size";
     const char *ord = g_sort_desc ? "desc" : "asc";
-    snprintf(buf, sizeof(buf), "%s %s", key, ord);
-    return buf;
+    snprintf(out, outsz, "%s %s", key, ord);
 }
+
+// Filter mode
+typedef enum { FILTER_ALL = 0, FILTER_DIRS = 1, FILTER_FILES = 2 } FilterMode;
+static FilterMode g_filter_mode = FILTER_ALL;
+static const char *filter_mode_label(void) {
+    switch (g_filter_mode) {
+        case FILTER_DIRS: return "dirs";
+        case FILTER_FILES: return "files";
+        default: return "all";
+    }
+}
+
+// Search state
+static char g_search_query[256] = "";
 
 static int cmp_entries(const void *a, const void *b) {
     const ViewEntry *ea = (const ViewEntry*)a;
@@ -561,6 +597,12 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
             if (S_ISLNK(st.st_mode)) { free(abs); continue; }
             if (dtype == DT_UNKNOWN) dtype = S_ISDIR(st.st_mode) ? DT_DIR : (S_ISREG(st.st_mode) ? DT_REG : DT_UNKNOWN);
         }
+        int is_dir = (dtype == DT_DIR) ? 1 : 0;
+        // Filter
+        int include = 1;
+        if (g_filter_mode == FILTER_DIRS && !is_dir) include = 0;
+        if (g_filter_mode == FILTER_FILES && is_dir) include = 0;
+        if (!include) { free(abs); continue; }
         if (out->n == out->cap) {
             size_t newcap = out->cap ? out->cap * 2 : 128;
             void *nv = realloc(out->v, newcap * sizeof(ViewEntry));
@@ -570,7 +612,7 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
         ViewEntry *ve = &out->v[out->n++];
         ve->name = xstrdup(de->d_name);
         ve->abs_path = abs;
-        ve->is_dir = (dtype == DT_DIR) ? 1 : 0;
+        ve->is_dir = is_dir;
         if (dtype == DT_REG) ve->mtime = st.st_mtime; else ve->mtime = time(NULL);
         if (ve->is_dir) {
             CacheEntry *ce = cache_get(cache, ve->abs_path);
@@ -604,8 +646,9 @@ static void draw_header(const char *root, const char *cur) {
     } else {
         snprintf(relbuf, sizeof(relbuf), "%s", cur);
     }
-    char title[PATH_MAX + 128];
-    snprintf(title, sizeof(title), " fastdu - root: %s - cwd: %s - sort: %s  ", root, relbuf, sort_mode_label());
+    char sortbuf[32]; sort_label_with_order(sortbuf, sizeof(sortbuf));
+    char title[PATH_MAX + 256];
+    snprintf(title, sizeof(title), " fastdu - root: %s - cwd: %s - sort: %s - filter: %s  ", root, relbuf, sortbuf, filter_mode_label());
     mvaddnstr(0, 0, title, cols-1);
     attroff(COLOR_PAIR(1));
 
@@ -718,6 +761,22 @@ static void draw_status(const char *msg) {
     // Note: no pause here; message will be overwritten on next refresh
 }
 
+static int prompt_input(char *buf, size_t bufsz, const char *label) {
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    echo(); curs_set(1);
+    mvhline(rows-1, 0, ' ', cols);
+    mvaddnstr(rows-1, 0, label, cols-1);
+    int x = (int)strlen(label);
+    move(rows-1, x);
+    int rc = getnstr(buf, (int)bufsz - 1);
+    noecho(); curs_set(0);
+    if (rc == ERR) { buf[0] = '\0'; return 0; }
+    // Trim trailing spaces
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n-1] == ' ' || buf[n-1] == '\t' || buf[n-1] == '\r')) { buf[--n] = '\0'; }
+    return (int)n;
+}
+
 static void show_help(void) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
     int w = cols - 4; if (w < 40) w = cols - 2; if (w < 20) w = cols;
@@ -743,6 +802,8 @@ static void show_help(void) {
         "Actions:",
         "  r - rescan selected dir",
         "  R - rescan current dir",
+        "  f - find by name (case-insensitive), n/N next/prev",
+        "  t - toggle filter (all/dirs/files)",
         "  SPACE - mark/unmark file/dir",
         "  m - move marked to current directory",
         "  d - delete marked (if any) else delete selected",
@@ -1322,6 +1383,65 @@ int main(int argc, char **argv) {
                 if (markset_has(&g_marks, ve->abs_path)) markset_remove(&g_marks, ve->abs_path);
                 else markset_add(&g_marks, ve->abs_path);
             }
+        } else if (ch == 'f' || ch == 'F') {
+            char q[256];
+            if (prompt_input(q, sizeof(q), "Trova: ") > 0) {
+                strncpy(g_search_query, q, sizeof(g_search_query)); g_search_query[sizeof(g_search_query)-1]='\0';
+                if (dv.n > 0) {
+                    size_t start = (dv.selected < dv.n) ? dv.selected : 0;
+                    int found = -1;
+                    // search forward including next, wrap around
+                    for (size_t off = 1; off <= dv.n; off++) {
+                        size_t idx = (start + off) % dv.n;
+                        if (strcasestr_bool(dv.v[idx].name, g_search_query)) { found = (int)idx; break; }
+                    }
+                    if (found >= 0) {
+                        dv.selected = (size_t)found;
+                        int rows, cols; getmaxyx(stdscr, rows, cols);
+                        int list_rows = rows - 3;
+                        if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                        if ((int)dv.selected < top) top = (int)dv.selected;
+                    } else {
+                        draw_status("Nessuna corrispondenza");
+                    }
+                }
+            }
+        } else if (ch == 'n') {
+            if (g_search_query[0] && dv.n > 0) {
+                size_t start = (dv.selected < dv.n) ? dv.selected : 0;
+                int found = -1;
+                for (size_t off = 1; off <= dv.n; off++) {
+                    size_t idx = (start + off) % dv.n;
+                    if (strcasestr_bool(dv.v[idx].name, g_search_query)) { found = (int)idx; break; }
+                }
+                if (found >= 0) {
+                    dv.selected = (size_t)found;
+                    int rows, cols; getmaxyx(stdscr, rows, cols);
+                    int list_rows = rows - 3;
+                    if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                    if ((int)dv.selected < top) top = (int)dv.selected;
+                } else {
+                    draw_status("Nessuna corrispondenza");
+                }
+            }
+        } else if (ch == 'N') {
+            if (g_search_query[0] && dv.n > 0) {
+                size_t start = (dv.selected < dv.n) ? dv.selected : 0;
+                int found = -1;
+                for (size_t off = 1; off <= dv.n; off++) {
+                    size_t idx = (start + dv.n - off) % dv.n;
+                    if (strcasestr_bool(dv.v[idx].name, g_search_query)) { found = (int)idx; break; }
+                }
+                if (found >= 0) {
+                    dv.selected = (size_t)found;
+                    int rows, cols; getmaxyx(stdscr, rows, cols);
+                    int list_rows = rows - 3;
+                    if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                    if ((int)dv.selected < top) top = (int)dv.selected;
+                } else {
+                    draw_status("Nessuna corrispondenza");
+                }
+            }
         } else if (ch == 'o' || ch == 'O') {
             // toggle sort key (size/name), keep selection on same path
             if (dv.n > 0) {
@@ -1335,6 +1455,20 @@ int main(int argc, char **argv) {
                 free(sel_path);
             } else {
                 g_sort_mode = (g_sort_mode == SORT_SIZE) ? SORT_NAME : SORT_SIZE;
+            }
+        } else if (ch == 't' || ch == 'T') {
+            // toggle filter: all -> dirs -> files -> all
+            if (dv.n > 0) {
+                char *sel_path = xstrdup(dv.v[dv.selected].abs_path);
+                g_filter_mode = (g_filter_mode == FILTER_ALL) ? FILTER_DIRS : (g_filter_mode == FILTER_DIRS ? FILTER_FILES : FILTER_ALL);
+                view_free(&dv);
+                build_dir_view(current, root, &cache, &dv);
+                size_t new_idx = 0; int found = 0;
+                for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
+                if (found) dv.selected = new_idx; else dv.selected = 0;
+                free(sel_path);
+            } else {
+                g_filter_mode = (g_filter_mode == FILTER_ALL) ? FILTER_DIRS : (g_filter_mode == FILTER_DIRS ? FILTER_FILES : FILTER_ALL);
             }
         } else if (ch == 's' || ch == 'S') {
             // toggle sort order (asc/desc), keep selection
