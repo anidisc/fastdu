@@ -1,63 +1,63 @@
 # fastdu
 
-Un visualizzatore TUI (ncurses) veloce per l’uso del disco, scritto in C, con scansione parallela e cache su file.
+A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-Caratteristiche
-- Scansione parallela: usa un work-queue profondo con più thread (pthreads)
-- TUI reattiva: elenco ordinabile per dimensione o nome, ricerca incrementale, filtri (tutti/dir/file)
-- Cache persistente: salva risultati di scansione in .fastdu_cache_v2 al root per riusi successivi
-- Aggiornamento mirato: riscan automatico della directory selezionata se rilevate modifiche (mtime)
-- Operazioni: selezione multipla (mark), spostamento e cancellazione con aggiornamento cache incrementale
+Features
+- Parallel scanning: deep work-queue with multiple threads (pthreads)
+- Responsive TUI: sortable by size or name, incremental search, filters (all/dirs/files)
+- Persistent cache: saves scan results to .fastdu_cache_v2 at the root for reuse
+- Targeted refresh: automatic rescan of the hovered directory when modified (mtime)
+- Operations: multi-select (mark), move, and delete with incremental cache updates
 
-Requisiti
-- gcc (o un compilatore C11 compatibile)
-- ncurses con supporto wide-char (linkato come -lncursesw)
+Requirements
+- gcc (or a C11-compatible compiler)
+- ncurses with wide-char support (linked as -lncursesw)
 - pthreads
 
-Installazione (Fedora/RHEL)
+Install (Fedora/RHEL)
 - sudo dnf install gcc make ncurses-devel
 
 Build
 - make
 
-Esecuzione
-- ./fastdu [opzioni] [percorso]
+Run
+- ./fastdu [options] [path]
 
-Opzioni
-- -R, --reload    forza la ricostruzione del cache
-- -j N, --jobs N  imposta il numero di thread (default: CPU online, max 64)
+Options
+- -R, --reload    force cache rebuild
+- -j N, --jobs N  set number of threads (default: online CPUs, max 64)
 
-Tasti TUI (principali)
-- Navigazione: Frecce o j/k su/giù, Enter/Right l per entrare, Backspace/Left per uscire
-- Vista: o cambia chiave sort (size/name), s cambia ordine (asc/desc)
-- Filtri: t ruota all/dirs/files, T abilita/disabilita filtro per query
-- Ricerca: f avvia ricerca, n/N successivo/precedente
-- Rescan: r riscan directory selezionata, R riscan directory corrente
-- Selezione multipla: Space marca/smarca; m sposta marcati nella dir corrente
-- Eliminazione: d elimina marcati (se presenti) o l’elemento selezionato
-- Aiuto/uscita: h mostra aiuto, q esce
+TUI keys (highlights)
+- Navigation: arrows or j/k up/down, Enter/Right l to enter, Backspace/Left to go up
+- View: o toggles sort key (size/name), s toggles order (asc/desc)
+- Filters: t cycles all/dirs/files, T toggles filter-by-query
+- Search: f prompt, n/N next/previous match
+- Rescan: r rescan selected dir, R rescan current dir
+- Multi-select: Space mark/unmark; m move marked into current dir
+- Delete: d delete marked (if any) or the selected entry
+- Help/quit: h help, q quit
 
 Cache
-- Il file .fastdu_cache_v2 è scritto nella directory root scansionata.
-- Ogni entry contiene percorso relativo (percent-encoded), dimensione, timestamp di scansione, inode e mtime.
-- Il cache viene invalidato/aggiornato quando vengono rilevate modifiche (mtime diverso) o a seguito di operazioni (move/delete).
+- The .fastdu_cache_v2 file is stored at the scan root directory.
+- Each entry includes a percent-encoded relative path, size, scan timestamp, inode and mtime.
+- The cache is updated/invalidated when changes are detected (mtime differs) or after operations (move/delete).
 
-Note di progettazione
-- Sicurezza FS: non segue symlink (usa O_NOFOLLOW/fstatat) ed evita di includere il file di cache nel conteggio.
-- Concorrenza: usa mutex per proteggere il cache e contatori atomici per progress/metriche.
-- UI: disegno throttled della barra di avanzamento per ridurre flicker.
+Design notes
+- FS safety: does not follow symlinks (uses O_NOFOLLOW/fstatat) and skips the cache file size in totals.
+- Concurrency: mutex-protected cache + atomic counters for progress/metrics.
+- UI: throttled status/progress updates to reduce flicker.
 
-Struttura del codice
-- fastdu.c    sorgente principale (util, cache, scanner, TUI, work-queue)
-- Makefile    regole di build (gcc -O2 -Wall -Wextra -std=c11 -lncursesw -lpthread)
+Code layout
+- fastdu.c    main source (util, cache, scanner, TUI, work-queue)
+- Makefile    build rules (gcc -O2 -Wall -Wextra -std=c11 -lncursesw -lpthread)
 
-Esempi
-- Avvio sul percorso corrente: ./fastdu
-- Forza rescan con 8 thread: ./fastdu -R -j 8 /percorso/da/scansionare
+Examples
+- Start on current path: ./fastdu
+- Force rescan with 8 threads: ./fastdu -R -j 8 /path/to/scan
 
-Limitazioni note
-- Non considera hard link multipli come deduplicabili tra directory diverse.
-- Dimensioni mostrate sono la somma delle dimensioni dei file regolari (non il disk usage su blocchi).
+Known limitations
+- Hard links to the same inode are not deduplicated across directories.
+- Reported size is the sum of regular file sizes (not block disk usage).
 
 License
-- TBD (inserisci la licenza preferita, ad es. MIT)
+- TBD (add your preferred license, e.g. MIT)
