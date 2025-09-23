@@ -547,6 +547,7 @@ static void sort_label_with_order(char *out, size_t outsz) {
 // Filter mode
 typedef enum { FILTER_ALL = 0, FILTER_DIRS = 1, FILTER_FILES = 2 } FilterMode;
 static FilterMode g_filter_mode = FILTER_ALL;
+static int g_filter_by_query = 0; // if 1, show only entries matching g_search_query
 static const char *filter_mode_label(void) {
     switch (g_filter_mode) {
         case FILTER_DIRS: return "dirs";
@@ -602,6 +603,7 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
         int include = 1;
         if (g_filter_mode == FILTER_DIRS && !is_dir) include = 0;
         if (g_filter_mode == FILTER_FILES && is_dir) include = 0;
+        if (g_filter_by_query && g_search_query[0] != '\0' && !strcasestr_bool(de->d_name, g_search_query)) include = 0;
         if (!include) { free(abs); continue; }
         if (out->n == out->cap) {
             size_t newcap = out->cap ? out->cap * 2 : 128;
@@ -657,7 +659,13 @@ static void draw_header(const char *root, const char *cur) {
     char totalbuf[64];
     human_size((unsigned long long)g_last_bytes, totalbuf, sizeof(totalbuf));
     char footer[256];
-    snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu ", (unsigned long long)g_last_files, totalbuf, g_marks.n);
+    if (g_search_query[0]) {
+        char qbuf[128];
+        snprintf(qbuf, sizeof(qbuf), " | query:%s", g_search_query);
+        snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, qbuf);
+    } else {
+        snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu ", (unsigned long long)g_last_files, totalbuf, g_marks.n);
+    }
     mvaddnstr(rows-2, 0, footer, cols-1);
     attroff(COLOR_PAIR(1));
 }
@@ -803,7 +811,8 @@ static void show_help(void) {
         "  r - rescan selected dir",
         "  R - rescan current dir",
         "  f - find by name (case-insensitive), n/N next/prev",
-        "  t - toggle filter (all/dirs/files)",
+        "  t - toggle type filter (all/dirs/files)",
+        "  T - toggle filter by query",
         "  SPACE - mark/unmark file/dir",
         "  m - move marked to current directory",
         "  d - delete marked (if any) else delete selected",
@@ -1456,8 +1465,8 @@ int main(int argc, char **argv) {
             } else {
                 g_sort_mode = (g_sort_mode == SORT_SIZE) ? SORT_NAME : SORT_SIZE;
             }
-        } else if (ch == 't' || ch == 'T') {
-            // toggle filter: all -> dirs -> files -> all
+        } else if (ch == 't') {
+            // toggle filter: all -> dirs -> files -> all (lowercase t)
             if (dv.n > 0) {
                 char *sel_path = xstrdup(dv.v[dv.selected].abs_path);
                 g_filter_mode = (g_filter_mode == FILTER_ALL) ? FILTER_DIRS : (g_filter_mode == FILTER_DIRS ? FILTER_FILES : FILTER_ALL);
@@ -1469,6 +1478,34 @@ int main(int argc, char **argv) {
                 free(sel_path);
             } else {
                 g_filter_mode = (g_filter_mode == FILTER_ALL) ? FILTER_DIRS : (g_filter_mode == FILTER_DIRS ? FILTER_FILES : FILTER_ALL);
+            }
+        } else if (ch == 'T') {
+            // toggle filter by query
+            if (!g_search_query[0]) {
+                draw_status("Nessuna query di ricerca memorizzata");
+            } else {
+                int new_state = !g_filter_by_query;
+                if (new_state) {
+                    char *sel_path = (dv.n > 0) ? xstrdup(dv.v[dv.selected].abs_path) : NULL;
+                    g_filter_by_query = 1;
+                    view_free(&dv);
+                    build_dir_view(current, root, &cache, &dv);
+                    if (dv.n == 0) {
+                        // nothing matches: revert
+                        g_filter_by_query = 0;
+                        build_dir_view(current, root, &cache, &dv);
+                        draw_status("Nessun elemento corrisponde alla query");
+                    } else if (sel_path) {
+                        size_t new_idx = 0; int found = 0;
+                        for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
+                        if (found) dv.selected = new_idx; else dv.selected = 0;
+                    }
+                    if (sel_path) free(sel_path);
+                } else {
+                    g_filter_by_query = 0;
+                    view_free(&dv);
+                    build_dir_view(current, root, &cache, &dv);
+                }
             }
         } else if (ch == 's' || ch == 'S') {
             // toggle sort order (asc/desc), keep selection
