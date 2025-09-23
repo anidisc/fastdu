@@ -1,3 +1,41 @@
+/*
+ * fastdu — A fast, TUI-based disk usage explorer (ncurses + pthreads)
+ *
+ * Overview
+ * --------
+ * fastdu provides a terminal UI to explore directory sizes quickly.
+ * It scans directories in parallel using a deep work queue and caches
+ * results to a TSV-like file (.fastdu_cache_v2) at the scan root to
+ * avoid rescanning unchanged directories. The TUI displays a sortable
+ * list (by size or name), supports filtering, incremental find, marks
+ * for bulk operations, and live progress during scans.
+ *
+ * Architecture at a glance
+ * ------------------------
+ * - Util: Small helpers for strings/paths, human-readable sizes, and
+ *   lightweight percent-encoding/decoding for cache safety.
+ * - Cache: In-memory store (with mutex) of per-directory scan results,
+ *   persisted to a per-root cache file. Entries track size, inode and
+ *   mtime to detect changes and allow partial rescans.
+ * - Scanner: Two implementations — a straightforward recursive walker
+ *   and a parallel deep work queue backed by multiple threads. Both
+ *   avoid following symlinks and skip the cache file in the root.
+ * - UI/TUI: ncurses-based list view with header/footer and keyboard
+ *   controls (help, sort, filter, find, mark/move/delete, rescan).
+ *   Progress is rendered on the status line during long scans.
+ * - Operations: File moves and deletions update the cache incrementally
+ *   (delta adjustments) to keep the UI responsive without full rescans.
+ *
+ * Notes on portability and safety
+ * -------------------------------
+ * - Uses openat/fstatat/O_NOFOLLOW where possible to avoid TOCTOU races
+ *   and to prevent following symlinks into unexpected trees.
+ * - Uses wide-character ncurses (linked with -lncursesw) and locale.
+ * - Concurrency relies on pthreads; cache is guarded by a mutex.
+ * - Progress and totals are maintained with atomic counters.
+ *
+ * Build: see Makefile (gcc -O2 -Wall -Wextra -std=c11 -lncursesw -lpthread)
+ */
 #define _XOPEN_SOURCE 700
 #define _DEFAULT_SOURCE
 #include <stdio.h>
@@ -29,6 +67,17 @@
 // ------------------------------
 // Util
 // ------------------------------
+/*
+ * Stringhe e path helpers:
+ * - xstrdup: strdup sicuro che ritorna NULL su OOM.
+ * - path_join: unisce segmenti con '/' singolo, senza normalizzare '..'.
+ * - is_dot_or_dotdot: filtra "." e ".." durante le scansioni.
+ * - human_size: formatta byte in unità umane (B, KiB, MiB...).
+ * - get_parent: calcola il parent di un path assoluto, gestendo root.
+ * - pct_encode/pct_decode: codifica tab/newline/% per salvare in TSV.
+ * - relpath_from_abs/abspath_from_rel: calcolo percorsi relativi/assoluti
+ *   rispetto al root di scansione per persistenza su disco.
+ */
 static char *xstrdup(const char *s) {
     if (!s) return NULL;
     size_t n = strlen(s) + 1;
@@ -56,6 +105,14 @@ static int is_dot_or_dotdot(const char *name) {
     return (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')));
 }
 
+/*
+ * human_size
+ * -----------
+ * Converte un valore di byte (v) in una stringa leggibile (es. "12.3 GiB").
+ * - Usa potenze di 1024 (KiB, MiB, ...).
+ * - Per valori < 1 KiB mantiene numero intero in byte.
+ * - Scrive in buf (di dimensione bufsz). Non alloca memoria.
+ */
 static void human_size(unsigned long long v, char *buf, size_t bufsz) {
     const char *units[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB"};
     int i = 0;
@@ -181,6 +238,20 @@ static char *abspath_from_rel(const char *root, const char *rel) {
 // ------------------------------
 // Cache
 // ------------------------------
+/*
+ * Il cache in memoria indicizza directory assolute -> dimensione totale,
+ * inode e mtime. Viene serializzato in un file di testo al root della
+ * scansione (CACHE_FILENAME) per riuso tra esecuzioni.
+ *
+ * Formato v2:
+ *   # fastdu-cache v2
+ *   root\t<abs_root>
+ *   D\t<rel_path_pct>\t<size>\t<last_scan_epoch>\t<ino>\t<dir_mtime>
+ *
+ * - rel_path_pct: percorso relativo percent-encoded (tab/newline/%).
+ * - last_scan_epoch: time_t della scansione.
+ * - ino/dir_mtime: consentono verifiche veloci di invalidazione.
+ */
 typedef struct {
     char *abs_path;
     char *rel_path;
@@ -255,6 +326,12 @@ static CacheEntry *cache_upsert(Cache *c, const char *root, const char *abs_path
     return out;
 }
 
+/*
+ * cache_save
+ * ----------
+ * Serializza tutte le voci del cache su CACHE_FILENAME sotto 'root'.
+ * Ritorna 0 su successo, -1 in caso di errori (es. OOM, I/O).
+ */
 static int cache_save(const char *root, const Cache *c) {
     char *cache_path = path_join(root, CACHE_FILENAME);
     if (!cache_path) return -1;
@@ -280,6 +357,12 @@ static int cache_save(const char *root, const Cache *c) {
     return 0;
 }
 
+/*
+ * cache_load
+ * ----------
+ * Tenta di caricare il cache esistente da disco.
+ * Ritorna 1 se caricato, 0 se non trovato, -1 su errore.
+ */
 static int cache_load(const char *root, Cache *c) {
     char *cache_path = path_join(root, CACHE_FILENAME);
     if (!cache_path) return -1;
@@ -339,6 +422,15 @@ static int cache_load(const char *root, Cache *c) {
 // ------------------------------
 // Scanner
 // ------------------------------
+/*
+ * Scansione directory:
+ * - scan_dir_recursive_fd: cammina il filesystem a partire da un dirfd,
+ *   evitando symlink e sommando i byte dei file regolari. Aggiorna il
+ *   cache per ogni directory visitata con inode/mtime per invalidazione.
+ * - scan_dir_parallel_deep: esegue la scansione in parallelo usando una
+ *   coda di task profonda con più thread, mantenendo statistiche globali.
+ * Entrambe le varianti saltano il file di cache nella root.
+ */
 static atomic_ullong g_progress_count = 0;
 static atomic_int     g_active_workers = 0;
 static atomic_ullong g_total_files = 0;
@@ -364,6 +456,13 @@ typedef struct {
     const char *phase; // e.g. "Scansione"
 } ScanUI;
 
+/*
+ * draw_progress_ui
+ * -----------------
+ * Ridisegna periodicamente (throttle ~33fps) la riga di stato in basso,
+ * mostrando barra di avanzamento, conteggi e path corrente. Evita flicker
+ * aggiornando solo se è passato abbastanza tempo dall’ultimo draw.
+ */
 static void draw_progress_ui(ScanUI *ui, const char *current_path) {
     if (!ui || !ui->enabled) return;
     struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
@@ -395,6 +494,22 @@ static void draw_progress_ui(ScanUI *ui, const char *current_path) {
     refresh();
 }
 
+/*
+ * scan_dir_recursive_fd
+ * ---------------------
+ * Parametri:
+ *  - dirfd: file descriptor aperto su directory corrente (O_DIRECTORY).
+ *  - abs_path: path assoluto della directory corrente.
+ *  - root: root della scansione (per saltare il file di cache).
+ *  - cache_file_abs: path assoluto del file cache da non contare.
+ *  - cache: puntatore al cache condiviso (thread-safe su upsert/get).
+ *  - ui: opzionale, per aggiornare progress.
+ *
+ * Comportamento:
+ *  - Somma le dimensioni dei file regolari in modo robusto (fstatat).
+ *  - Non segue symlink (AT_SYMLINK_NOFOLLOW, check DT_LNK/S_ISLNK).
+ *  - Per sotto-directory, richiama ricorsivamente e aggiorna il cache.
+ */
 static unsigned long long scan_dir_recursive_fd(int dirfd, const char *abs_path, const char *root, const char *cache_file_abs, Cache *cache, ScanUI *ui) {
     unsigned long long total = 0ULL;
     int dupfd = dup(dirfd);
@@ -455,6 +570,16 @@ static unsigned long long scan_dir_recursive(const char *dir, const char *root, 
 // ------------------------------
 // Directory view / UI data
 // ------------------------------
+/*
+ * La vista directory (DirView) raccoglie le entry correnti: nome, path,
+ * tipo (file/dir), dimensione nota o meno e mtime per file. Le dimensioni
+ * delle directory provengono dal cache; se non presenti, la dimensione è
+ * "sconosciuta" finché non viene eseguita una scansione.
+ *
+ * Il sorting è configurabile (per dimensione o nome, ordine asc/desc),
+ * e il filtro può limitare la lista a file o directory. Una ricerca in
+ * memoria (case-insensitive) consente di spostare rapidamente la selezione.
+ */
 typedef struct {
     char *name;
     char *abs_path;
@@ -579,6 +704,14 @@ static int cmp_entries(const void *a, const void *b) {
     }
 }
 
+/*
+ * build_dir_view
+ * --------------
+ * Costruisce la lista di voci da mostrare nella TUI per la directory
+ * indicata da 'path'. Applica filtri, popola dimensioni (dal cache per
+ * le dir e dal filesystem per i file) e ordina secondo le preferenze.
+ * Ritorna 0 su successo, -1 in caso di errore nell'aprire la directory.
+ */
 static int build_dir_view(const char *path, const char *root, Cache *cache, DirView *out) {
     memset(out, 0, sizeof(*out));
     out->path = xstrdup(path);
@@ -635,6 +768,15 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
 // ------------------------------
 // TUI
 // ------------------------------
+/*
+ * Interfaccia ncurses:
+ * - draw_header/draw_list/draw_status: rendering della lista, header,
+ *   footer e messaggi.
+ * - show_help: finestra di aiuto con scorciatoie da tastiera.
+ * - prompt_input: input a riga di stato (ricerca testuale).
+ * - maybe_rescan_hovered: quando l'utente sosta su una directory, se
+ *   l'mtime è cambiato rispetto al cache, esegue un rescan tattico.
+ */
 static MarkSet g_marks; // global marks set for UI
 static void draw_header(const char *root, const char *cur) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
@@ -684,6 +826,14 @@ static int compute_size_col_width(const DirView *dv) {
 }
 
 
+/*
+ * draw_list
+ * ---------
+ * Disegna l’elenco con colonne: [mark] [size] [type] [name].
+ * - Dimensioni sono allineate a destra in una larghezza dinamica.
+ * - Usa colori distinti per directory e file.
+ * - Evidenzia la riga selezionata con reverse + bold.
+ */
 static void draw_list(const DirView *dv, int top) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
     int y = 1; // below header
@@ -731,6 +881,14 @@ static void draw_list(const DirView *dv, int top) {
     }
 }
 
+/*
+ * maybe_rescan_hovered
+ * --------------------
+ * Selezione su directory: effettua un controllo debounced (>=700ms o
+ * cambio di selezione) e, se l'mtime della directory differisce da
+ * quanto registrato nel cache, esegue una scansione limitata a quel
+ * subtree per aggiornare rapidamente i dati.
+ */
 static void maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
     static char last_path[PATH_MAX] = "";
     static struct timespec last_check = {0,0};
@@ -842,6 +1000,13 @@ static int confirm_delete_prompt(const char *name, int is_dir) {
     return (ch == 'y' || ch == 'Y');
 }
 
+/*
+ * remove_tree
+ * -----------
+ * Elimina in modo ricorsivo file o directory (senza seguire symlink).
+ * Protegge il file di cache (se specificato) per evitare di rimuoverlo.
+ * Ritorna 0 su successo, -1 su errore.
+ */
 static int remove_tree(const char *path, const char *cache_file_abs) {
     struct stat st;
     if (lstat(path, &st) != 0) return -1;
@@ -965,6 +1130,18 @@ static void cache_move_prefix(Cache *c, const char *root, const char *old_prefix
 // ------------------------------
 // Parallel scanning helpers (deep work queue)
 // ------------------------------
+/*
+ * Coda di task e worker pool:
+ * - TaskQueue: coda circolare bloccante con due condition variables.
+ * - WaitGroupC: primitiva per attendere il completamento dei task.
+ * - DirTask: rappresenta una directory da processare; accumula byte dei
+ *   file e dei figli; alla finalizzazione aggiorna il cache e propaga il
+ *   totale al genitore (con conteggio pending per finalizzare in cascata).
+ *
+ * I worker eseguono process_task, che visita le entry e accoda nuove
+ * sotto-directory. Quando una task non ha più figli pendenti, finalize_task
+ * calcola il totale e aggiorna cache/genitore, quindi decrementa la WG.
+ */
 
 typedef struct {
     pthread_mutex_t mu;
@@ -1059,6 +1236,13 @@ static void enqueue_child(DirTask *parent, int cfd, const char *name) {
     tq_push(parent->q, child);
 }
 
+/*
+ * finalize_task
+ * -------------
+ * Conclude la task quando non ci sono più figli pendenti: scrive nel
+ * cache la dimensione totale della directory, propaga il totale al
+ * genitore e rilascia risorse (fd, path). Decrementa la WaitGroup.
+ */
 static void finalize_task(DirTask *t) {
     if (atomic_load(&t->pending) != 0) return;
     unsigned long long total = atomic_load(&t->files_size) + atomic_load(&t->children_size);
@@ -1082,6 +1266,13 @@ static void finalize_task(DirTask *t) {
     wg_done(wgptr);
 }
 
+/*
+ * process_task
+ * ------------
+ * Elabora una directory: accumula dimensioni dei file regolari e accoda
+ * le sotto-directory (openat + enqueue_child). Evita symlink e salta il
+ * file cache alla root. Alla fine invoca finalize_task.
+ */
 static void process_task(DirTask *t) {
     int dupfd = dup(t->dirfd);
     if (dupfd < 0) { finalize_task(t); return; }
@@ -1139,6 +1330,14 @@ static void *worker_loop(void *arg) {
     return NULL;
 }
 
+/*
+ * scan_dir_parallel_deep
+ * ----------------------
+ * Avvia un pool di worker per processare una coda profonda di directory
+ * (BFS-like), aggiornando un cache condiviso con mutex. Mantiene contatori
+ * atomici globali per files/bytes e disegna una progress bar non bloccante
+ * dal thread principale. Ritorna la dimensione totale del root.
+ */
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads) {
     ScanPool p; tq_init(&p.q, 4096); p.threads = threads; p.th = malloc((size_t)threads * sizeof(pthread_t)); wg_init(&p.wg);
     for (int i = 0; i < threads; i++) pthread_create(&p.th[i], NULL, worker_loop, &p);
@@ -1190,6 +1389,11 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
 // ------------------------------
 // Main
 // ------------------------------
+/*
+ * Entry point: parse degli argomenti (path, --reload, --jobs), setup
+ * della TUI, caricamento/ricostruzione del cache (con eventuale scansione
+ * iniziale), loop degli input utente e cleanup finale.
+ */
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
 
