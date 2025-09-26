@@ -64,6 +64,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
+#define FASTDU_VERSION "0.2.0"
 
 // ------------------------------
 // Util
@@ -1438,15 +1439,18 @@ static void install_signal_handlers(void) {
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
 
-// Arg parsing: [-R|--reload] [-j N|--jobs N] [path]
+// Arg parsing: [-R|--reload] [-j N|--jobs N] [-v|--version] [path]
     int reload_flag = 0;
     int jobs_override = 0;
+    int show_version = 0;
     const char *path_arg = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-R") == 0 || strcmp(argv[i], "--reload") == 0) {
             reload_flag = 1;
         } else if (strcmp(argv[i], "-j") == 0 || strcmp(argv[i], "--jobs") == 0) {
             if (i + 1 < argc) { jobs_override = atoi(argv[++i]); }
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            show_version = 1;
         } else {
             path_arg = argv[i];
         }
@@ -1465,6 +1469,11 @@ int main(int argc, char **argv) {
     } else {
         strncpy(root_in, cwd, sizeof(root_in));
         root_in[sizeof(root_in)-1] = '\0';
+    }
+
+    if (show_version) {
+        printf("fastdu %s\n", FASTDU_VERSION);
+        return 0;
     }
 
     char root[PATH_MAX];
@@ -1723,6 +1732,11 @@ int main(int argc, char **argv) {
                 size_t new_idx = 0; int found = 0;
                 for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
                 if (found) dv.selected = new_idx; else dv.selected = 0;
+                // adjust top so selection visible
+                int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+                if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                if ((int)dv.selected < top) top = (int)dv.selected;
+                if (top < 0) top = 0;
                 free(sel_path);
             } else {
                 g_filter_mode = (g_filter_mode == FILTER_ALL) ? FILTER_DIRS : (g_filter_mode == FILTER_DIRS ? FILTER_FILES : FILTER_ALL);
@@ -1748,11 +1762,21 @@ int main(int argc, char **argv) {
                         for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
                         if (found) dv.selected = new_idx; else dv.selected = 0;
                     }
+                    // adjust top so selection visible
+                    int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+                    if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                    if ((int)dv.selected < top) top = (int)dv.selected;
+                    if (top < 0) top = 0;
                     if (sel_path) free(sel_path);
                 } else {
                     g_filter_by_query = 0;
                     view_free(&dv);
                     build_dir_view(current, root, &cache, &dv);
+                    // adjust top
+                    int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+                    if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                    if ((int)dv.selected < top) top = (int)dv.selected;
+                    if (top < 0) top = 0;
                 }
             }
         } else if (ch == 's' || ch == 'S') {
