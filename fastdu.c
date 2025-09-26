@@ -66,6 +66,22 @@
 #define CACHE_FILENAME ".fastdu_cache_v2"
 #define FASTDU_VERSION "0.2.0"
 
+static void print_cli_usage(void) {
+    printf("fastdu %s\n", FASTDU_VERSION);
+    printf("Usage:\n");
+    printf("  fastdu [options] [path]\n\n");
+    printf("Options:\n");
+    printf("  -h, --help           Show this help and exit\n");
+    printf("  -v, --version        Show version and exit\n");
+    printf("  -R, --reload         Ignore cache and perform full rescan\n");
+    printf("  -j N, --jobs N       Number of worker threads (default: CPUs)\n\n");
+    printf("Examples:\n");
+    printf("  fastdu                 # open TUI on current directory\n");
+    printf("  fastdu -R /data        # full reload of /data, then open TUI\n");
+    printf("  fastdu -j 8 /data      # use 8 workers\n");
+    printf("  fastdu -v              # print version\n");
+}
+
 // ------------------------------
 // Util
 // ------------------------------
@@ -1439,10 +1455,11 @@ static void install_signal_handlers(void) {
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
 
-// Arg parsing: [-R|--reload] [-j N|--jobs N] [-v|--version] [path]
+// Arg parsing: [-R|--reload] [-j N|--jobs N] [-v|--version] [-h|--help] [path]
     int reload_flag = 0;
     int jobs_override = 0;
     int show_version = 0;
+    int cli_help_flag = 0;
     const char *path_arg = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-R") == 0 || strcmp(argv[i], "--reload") == 0) {
@@ -1451,6 +1468,8 @@ int main(int argc, char **argv) {
             if (i + 1 < argc) { jobs_override = atoi(argv[++i]); }
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
             show_version = 1;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            cli_help_flag = 1;
         } else {
             path_arg = argv[i];
         }
@@ -1473,6 +1492,10 @@ int main(int argc, char **argv) {
 
     if (show_version) {
         printf("fastdu %s\n", FASTDU_VERSION);
+        return 0;
+    }
+    if (cli_help_flag) {
+        print_cli_usage();
         return 0;
     }
 
