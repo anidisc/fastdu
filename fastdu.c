@@ -64,7 +64,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.2.0"
+#define FASTDU_VERSION "0.21.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -474,6 +474,46 @@ typedef struct {
     const char *phase; // e.g. "Scansione"
 } ScanUI;
 
+// Copy progress UI
+typedef struct {
+    int enabled;
+    unsigned long long total;
+    unsigned long long done;
+    struct timespec last_draw;
+    const char *phase; // e.g. "Copy"
+} CopyUI;
+
+static void draw_copy_progress(CopyUI *ui, const char *current_path) {
+    if (!ui || !ui->enabled) return;
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (now.tv_sec - ui->last_draw.tv_sec) * 1000 + (now.tv_nsec - ui->last_draw.tv_nsec) / 1000000;
+    if (ms < 30) return;
+    ui->last_draw = now;
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    char bar[256];
+    int barlen = cols > 40 ? (cols - 40) : 20;
+    if (barlen > (int)sizeof(bar) - 1) barlen = (int)sizeof(bar) - 1;
+    double frac = (ui->total > 0) ? ((double)ui->done / (double)ui->total) : 0.0;
+    if (frac > 1.0) frac = 1.0;
+    int filled = (int)(frac * barlen);
+    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
+    for (int i=0;i<barlen;i++) bar[i] = (i < filled) ? '#' : '.';
+    bar[barlen] = '\0';
+    char donebuf[64], totalbuf[64];
+    human_size((unsigned long long)ui->done, donebuf, sizeof(donebuf));
+    human_size((unsigned long long)ui->total, totalbuf, sizeof(totalbuf));
+    int percent = (int)(frac * 100.0 + 0.5);
+    char line[PATH_MAX + 256];
+    snprintf(line, sizeof(line), " %s: [%s] %s / %s (%d%%) - %s",
+             ui->phase ? ui->phase : "Copy",
+             bar, donebuf, totalbuf, percent,
+             current_path ? current_path : "");
+    int y = rows - 1;
+    mvhline(y, 0, ' ', cols);
+    mvaddnstr(y, 0, line, cols-1);
+    refresh();
+}
+
 /*
  * draw_progress_ui
  * -----------------
@@ -782,17 +822,124 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
     return 0;
 }
 
+// Utility: sum sizes for copy estimation (fd-based)
+static unsigned long long sum_dir_sizes_fd(int dirfd) {
+    unsigned long long total = 0ULL;
+    int dupfd = dup(dirfd);
+    if (dupfd < 0) return 0ULL;
+    DIR *dp = fdopendir(dupfd);
+    if (!dp) { close(dupfd); return 0ULL; }
+    struct dirent *de;
+    while ((de = readdir(dp)) != NULL) {
+        if (is_dot_or_dotdot(de->d_name)) continue;
+        if (strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
+        unsigned char dt = de->d_type;
+        if (dt == DT_LNK) continue;
+        if (dt == DT_REG) {
+            struct stat st;
+            if (fstatat(dirfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) total += (unsigned long long)st.st_size;
+        } else if (dt == DT_UNKNOWN) {
+            struct stat st0;
+            if (fstatat(dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) == 0) {
+                if (S_ISREG(st0.st_mode)) total += (unsigned long long)st0.st_size;
+                else if (S_ISDIR(st0.st_mode)) {
+                    int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                    if (cfd >= 0) { total += sum_dir_sizes_fd(cfd); close(cfd); }
+                }
+            }
+        } else if (dt == DT_DIR) {
+            int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (cfd >= 0) { total += sum_dir_sizes_fd(cfd); close(cfd); }
+        }
+    }
+    closedir(dp);
+    return total;
+}
+
+static unsigned long long sum_path_size(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return 0ULL;
+    if (S_ISREG(st.st_mode)) return (unsigned long long)st.st_size;
+    if (S_ISDIR(st.st_mode)) {
+        int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (fd < 0) return 0ULL;
+        unsigned long long s = sum_dir_sizes_fd(fd);
+        close(fd);
+        return s;
+    }
+    return 0ULL;
+}
+
+static int copy_file_with_progress(const char *src, const char *dst, CopyUI *ui) {
+    int sfd = open(src, O_RDONLY | O_NOFOLLOW);
+    if (sfd < 0) return -1;
+    struct stat st; fstat(sfd, &st);
+    int dfd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+    if (dfd < 0) { close(sfd); return -1; }
+    const size_t BUFSZ = 1<<20; // 1 MiB
+    char *buf = malloc(BUFSZ);
+    if (!buf) { close(sfd); close(dfd); return -1; }
+    ssize_t r;
+    while ((r = read(sfd, buf, BUFSZ)) > 0) {
+        ssize_t off = 0;
+        while (off < r) {
+            ssize_t w = write(dfd, buf + off, (size_t)(r - off));
+            if (w < 0) { free(buf); close(sfd); close(dfd); return -1; }
+            off += w;
+            if (ui) {
+                ui->done += (unsigned long long)w;
+                draw_copy_progress(ui, dst);
+            }
+        }
+    }
+    free(buf);
+    close(sfd);
+    close(dfd);
+    return (r < 0) ? -1 : 0;
+}
+
+static int copy_tree_with_progress(const char *src, const char *dst, CopyUI *ui, const char *root) {
+    struct stat st;
+    if (lstat(src, &st) != 0) return -1;
+    if (S_ISREG(st.st_mode)) {
+        // ensure parent dir exists assumed
+        return copy_file_with_progress(src, dst, ui);
+    } else if (S_ISDIR(st.st_mode)) {
+        // create dst dir
+        mkdir(dst, st.st_mode & 0777);
+        int sfd = open(src, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (sfd < 0) return -1;
+        DIR *dp = fdopendir(sfd);
+        if (!dp) { close(sfd); return -1; }
+        struct dirent *de;
+        while ((de = readdir(dp)) != NULL) {
+            if (is_dot_or_dotdot(de->d_name)) continue;
+            if (strcmp(de->d_name, CACHE_FILENAME) == 0 && strcmp(src, root) == 0) continue;
+            unsigned char dt = de->d_type;
+            if (dt == DT_LNK) continue;
+            char *child_src = path_join(src, de->d_name);
+            char *child_dst = path_join(dst, de->d_name);
+            if (!child_src || !child_dst) { free(child_src); free(child_dst); closedir(dp); return -1; }
+            int rc;
+            if (dt == DT_DIR || dt == DT_UNKNOWN) {
+                struct stat stc;
+                if (dt == DT_UNKNOWN) { if (lstat(child_src, &stc) != 0) { free(child_src); free(child_dst); continue; } }
+                rc = copy_tree_with_progress(child_src, child_dst, ui, root);
+            } else {
+                rc = copy_file_with_progress(child_src, child_dst, ui);
+            }
+            free(child_src); free(child_dst);
+            if (rc != 0) { /* continue best-effort */ }
+        }
+        closedir(dp);
+        return 0;
+    }
+    return -1;
+}
+
 // ------------------------------
 // TUI
 // ------------------------------
-/*
- * ncurses interface:
- * - draw_header/draw_list/draw_status: render list, header, footer, messages
- * - show_help: help overlay with keyboard shortcuts
- * - prompt_input: status-line input (text search)
- * - maybe_rescan_hovered: when hovering a directory, if its mtime differs
- *   from the cache, perform a targeted rescan of that subtree
- */
 static MarkSet g_marks; // global marks set for UI
 static void draw_header(const char *root, const char *cur) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
@@ -988,6 +1135,7 @@ static void show_help(void) {
         "  T - toggle filter by query",
         "  SPACE - mark/unmark file/dir",
         "  m - move marked to current directory",
+        "  c - copy marked to current directory (with progress)",
         "  d - delete marked (if any) else delete selected",
         "  o - toggle sort key (size/name)",
         "  s - toggle sort order (asc/desc)",
@@ -1859,6 +2007,60 @@ int main(int argc, char **argv) {
                     draw_status("Spostamento completato.");
                 } else {
                     for(size_t i=0;i<n;i++) free(list[i]); free(list);
+                }
+            }
+        } else if (ch == 'c') {
+            if (g_marks.n == 0) {
+                draw_status("Nessun elemento marcato.");
+            } else {
+                // Copy marked to current directory with progress
+                size_t n = g_marks.n;
+                char **list = malloc(n * sizeof(char*));
+                for (size_t i=0;i<n;i++) list[i] = xstrdup(g_marks.paths[i]);
+                // Compute total bytes
+                unsigned long long total = 0ULL;
+                for (size_t i=0;i<n;i++) total += sum_path_size(list[i]);
+                char prompt[PATH_MAX+128];
+                char totbuf[64]; human_size(total, totbuf, sizeof(totbuf));
+                snprintf(prompt, sizeof(prompt), "Copiare %zu elementi in '%s' (tot %s)? [y/N] ", n, current, totbuf);
+                draw_status(prompt); refresh(); int chc=getch();
+                if (chc=='y' || chc=='Y') {
+                    CopyUI ui = { .enabled = 1, .total = total, .done = 0, .phase = "Copy" };
+                    clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
+                    for (size_t i=0;i<n;i++) {
+                        const char *src = list[i];
+                        if (starts_with(current, src)) continue; // prevent copying dir into its subtree
+                        const char *base = path_basename_const(src);
+                        char *dst = path_join(current, base);
+                        if (!dst) continue;
+                        struct stat st; if (lstat(src,&st)!=0) { free(dst); continue; }
+                        if (S_ISDIR(st.st_mode)) {
+                            (void)copy_tree_with_progress(src, dst, &ui, root);
+                            // update cache for new dir
+                            char *cache_abs = path_join(root, CACHE_FILENAME);
+                            (void)scan_dir_recursive(dst, root, cache_abs, &cache, NULL);
+                            free(cache_abs);
+                            // add delta to ancestors using estimated (or recompute size via cache)
+                            CacheEntry *ced = cache_get(&cache, dst);
+                            unsigned long long dsz = ced ? ced->size : sum_path_size(dst);
+                            cache_add_ancestors_after_delta(&cache, root, dst, dsz);
+                        } else if (S_ISREG(st.st_mode)) {
+                            (void)copy_file_with_progress(src, dst, &ui);
+                            cache_add_ancestors_after_delta(&cache, root, dst, (unsigned long long)st.st_size);
+                        }
+                        free(dst);
+                    }
+                    // clear progress line
+                    int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh();
+                    cache_save(root, &cache);
+                    for (size_t i=0;i<n;i++) free(list[i]); free(list);
+                    // Refresh view
+                    size_t old_index = dv.selected;
+                    view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                    if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
+                    draw_status("Copia completata.");
+                } else {
+                    for (size_t i=0;i<n;i++) free(list[i]); free(list);
                 }
             }
         } else if (ch == 'd') {
