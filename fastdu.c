@@ -188,6 +188,52 @@ static const char *path_basename_const(const char *p) {
     return slash ? slash + 1 : p;
 }
 
+static int path_exists(const char *p) {
+    struct stat st; return lstat(p, &st) == 0;
+}
+
+static char *gen_nonconflicting_path(const char *dst) {
+    // split dir and name
+    const char *base = path_basename_const(dst);
+    size_t dirlen = (size_t)(base - dst);
+    char *dir = NULL;
+    if (dirlen == 0) dir = xstrdup(".");
+    else { dir = malloc(dirlen + 1); if (!dir) return NULL; memcpy(dir, dst, dirlen); dir[dirlen-1] = '\0'; }
+    // split extension
+    const char *dot = strrchr(base, '.');
+    size_t name_len = dot ? (size_t)(dot - base) : strlen(base);
+    size_t ext_len = dot ? strlen(dot) : 0;
+    char namebuf[PATH_MAX];
+    if (name_len >= sizeof(namebuf)) name_len = sizeof(namebuf)-1;
+    memcpy(namebuf, base, name_len); namebuf[name_len] = '\0';
+    const char *ext = dot ? dot : "";
+    // Try suffixes: " (copy)", then " (copy N)"
+    for (int i = 0; i < 1000; i++) {
+        char cand[PATH_MAX];
+        if (i == 0) snprintf(cand, sizeof(cand), "%s (copy)%s", namebuf, ext);
+        else snprintf(cand, sizeof(cand), "%s (copy %d)%s", namebuf, i+1, ext);
+        char *joined = path_join(dir, cand);
+        if (!joined) { free(dir); return NULL; }
+        if (!path_exists(joined)) { free(dir); return joined; }
+        free(joined);
+    }
+    free(dir);
+    return NULL;
+}
+
+static char prompt_conflict_action(const char *dst) {
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    char msg[PATH_MAX + 128];
+    snprintf(msg, sizeof(msg), "Conflitto su '%s': [o]verwrite, [r]ename, [s]kip ", dst);
+    mvhline(rows-1, 0, ' ', cols);
+    mvaddnstr(rows-1, 0, msg, cols-1);
+    refresh();
+    int ch = getch();
+    if (ch=='o'||ch=='O') return 'o';
+    if (ch=='r'||ch=='R') return 'r';
+    return 's';
+}
+
 // Percent-encode tabs/newlines/percent for safe TSV cache
 static char *pct_encode(const char *s) {
     size_t cap = strlen(s) * 3 + 1; // worst case all encoded
@@ -1987,6 +2033,13 @@ int main(int argc, char **argv) {
                         // compute delta
                         unsigned long long delta=0ULL; struct stat st; int is_dir=0;
                         if (lstat(src,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; CacheEntry*ce=cache_get(&cache,src); if(ce) delta=ce->size; else delta=scan_dir_recursive(src, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
+                        // handle conflict
+                        if (path_exists(dst)) {
+                            char act = prompt_conflict_action(dst);
+                            if (act=='s') { free(dst); continue; }
+                            if (act=='r') { char *nd = gen_nonconflicting_path(dst); free(dst); dst = nd ? nd : NULL; if (!dst) continue; }
+                            else if (act=='o') { remove_tree(dst, cache_abs); }
+                        }
                         // perform rename (move)
                         if (rename(src, dst)==0){
                             if (is_dir) cache_move_prefix(&cache, root, src, dst);
@@ -1994,7 +2047,23 @@ int main(int argc, char **argv) {
                             cache_add_ancestors_after_delta(&cache, root, dst, delta);
                             markset_remove_prefix(&g_marks, src);
                         } else {
-                            // if rename failed, leave mark as is
+                            // if rename failed, check EXDEV fallback: copy+unlink
+                            if (errno == EXDEV) {
+                                // copy with progress
+                                CopyUI mui = { .enabled = 1, .total = delta, .done = 0, .phase = "Move (copy)" };
+                                clock_gettime(CLOCK_MONOTONIC, &mui.last_draw);
+                                int rc2;
+                                if (is_dir) rc2 = copy_tree_with_progress(src, dst, &mui, root);
+                                else rc2 = copy_file_with_progress(src, dst, &mui);
+                                int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh();
+                                if (rc2 == 0) {
+                                    // remove source and update cache
+                                    remove_tree(src, cache_abs);
+                                    if (is_dir) cache_remove_prefix(&cache, src);
+                                    cache_adjust_ancestors_after_delta(&cache, root, src, (long long)delta);
+                                    cache_add_ancestors_after_delta(&cache, root, dst, delta);
+                                }
+                            }
                         }
                         free(dst);
                     }
@@ -2034,6 +2103,13 @@ int main(int argc, char **argv) {
                         char *dst = path_join(current, base);
                         if (!dst) continue;
                         struct stat st; if (lstat(src,&st)!=0) { free(dst); continue; }
+                        // handle conflict
+                        if (path_exists(dst)) {
+                            char act = prompt_conflict_action(dst);
+                            if (act=='s') { free(dst); continue; }
+                            if (act=='r') { char *nd = gen_nonconflicting_path(dst); free(dst); dst = nd ? nd : NULL; if (!dst) continue; }
+                            else if (act=='o') { remove_tree(dst, NULL); }
+                        }
                         if (S_ISDIR(st.st_mode)) {
                             (void)copy_tree_with_progress(src, dst, &ui, root);
                             // update cache for new dir
