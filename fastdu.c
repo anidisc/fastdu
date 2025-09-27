@@ -64,7 +64,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.21.0"
+#define FASTDU_VERSION "0.22.1"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -740,6 +740,7 @@ typedef struct {
 
 static void markset_init(MarkSet *m) { m->paths = NULL; m->n = m->cap = 0; }
 static void markset_free(MarkSet *m) { for (size_t i=0;i<m->n;i++) free(m->paths[i]); free(m->paths); m->paths=NULL; m->n=m->cap=0; }
+static void markset_clear(MarkSet *m) { for (size_t i=0;i<m->n;i++) free(m->paths[i]); m->n=0; }
 static int markset_index_of(MarkSet *m, const char *p) { for (size_t i=0;i<m->n;i++) if (strcmp(m->paths[i], p)==0) return (int)i; return -1; }
 static int markset_has(MarkSet *m, const char *p) { return markset_index_of(m,p) >= 0; }
 static void markset_add(MarkSet *m, const char *p) { if (markset_has(m,p)) return; if (m->n==m->cap){ size_t nc=m->cap?m->cap*2:64; void*nv=realloc(m->paths,nc*sizeof(char*)); if(!nv) return; m->paths=(char**)nv; m->cap=nc;} m->paths[m->n++]=xstrdup(p);} 
@@ -2068,6 +2069,8 @@ int main(int argc, char **argv) {
                         free(dst);
                     }
                     cache_save(root,&cache);
+                    // clear all marks after move to avoid unintended operations
+                    markset_clear(&g_marks);
                     for(size_t i=0;i<n;i++) free(list[i]); free(list);
                     // Refresh view
                     size_t old_index = dv.selected;
@@ -2129,6 +2132,8 @@ int main(int argc, char **argv) {
                     // clear progress line
                     int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh();
                     cache_save(root, &cache);
+                    // clear all marks after copy to avoid unintended operations
+                    markset_clear(&g_marks);
                     for (size_t i=0;i<n;i++) free(list[i]); free(list);
                     // Refresh view
                     size_t old_index = dv.selected;
