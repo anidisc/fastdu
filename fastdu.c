@@ -64,7 +64,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.22.1"
+#define FASTDU_VERSION "0.23.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -223,14 +223,15 @@ static char *gen_nonconflicting_path(const char *dst) {
 
 static char prompt_conflict_action(const char *dst) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
-    char msg[PATH_MAX + 128];
-    snprintf(msg, sizeof(msg), "Conflitto su '%s': [o]verwrite, [r]ename, [s]kip ", dst);
+    char msg[PATH_MAX + 256];
+    snprintf(msg, sizeof(msg), "Conflitto su '%s': [o]verwrite, [r]ename, [s]kip, [O] overwrite all, [R] rename all, [S] skip all ", dst);
     mvhline(rows-1, 0, ' ', cols);
     mvaddnstr(rows-1, 0, msg, cols-1);
     refresh();
     int ch = getch();
-    if (ch=='o'||ch=='O') return 'o';
-    if (ch=='r'||ch=='R') return 'r';
+    if (ch=='o'||ch=='O') return (ch=='O') ? 'O' : 'o';
+    if (ch=='r'||ch=='R') return (ch=='R') ? 'R' : 'r';
+    if (ch=='s'||ch=='S') return (ch=='S') ? 'S' : 's';
     return 's';
 }
 
@@ -2024,10 +2025,10 @@ int main(int argc, char **argv) {
                 char prompt[PATH_MAX+128]; snprintf(prompt, sizeof(prompt), "Spostare %zu elementi in '%s'? [y/N] ", n, current);
                 draw_status(prompt); refresh(); int chc=getch();
                 if (chc=='y'||chc=='Y'){
-                    for (size_t i=0;i<n;i++){
+                    char conflict_all_m = 0; char conflict_action_all_m = 0; // 'o','r','s'
+                    for (size_t i=0;i<n;i++) {
                         const char *src = list[i];
-                        // disallow moving dir into its own subtree
-                        if (starts_with(current, src)) { continue; }
+                        if (starts_with(current, src)) continue; // prevent copying dir into its subtree
                         const char *base = path_basename_const(src);
                         char *dst = path_join(current, base);
                         if (!dst) continue;
@@ -2036,7 +2037,8 @@ int main(int argc, char **argv) {
                         if (lstat(src,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; CacheEntry*ce=cache_get(&cache,src); if(ce) delta=ce->size; else delta=scan_dir_recursive(src, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
                         // handle conflict
                         if (path_exists(dst)) {
-                            char act = prompt_conflict_action(dst);
+                            char act = conflict_all_m ? conflict_action_all_m : prompt_conflict_action(dst);
+                            if (act=='O' || act=='R' || act=='S') { conflict_all_m = 1; conflict_action_all_m = (char)tolower(act); act = conflict_action_all_m; }
                             if (act=='s') { free(dst); continue; }
                             if (act=='r') { char *nd = gen_nonconflicting_path(dst); free(dst); dst = nd ? nd : NULL; if (!dst) continue; }
                             else if (act=='o') { remove_tree(dst, cache_abs); }
@@ -2099,6 +2101,7 @@ int main(int argc, char **argv) {
                 if (chc=='y' || chc=='Y') {
                     CopyUI ui = { .enabled = 1, .total = total, .done = 0, .phase = "Copy" };
                     clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
+                    char conflict_all = 0; char conflict_action_all = 0; // 'o','r','s'
                     for (size_t i=0;i<n;i++) {
                         const char *src = list[i];
                         if (starts_with(current, src)) continue; // prevent copying dir into its subtree
@@ -2108,10 +2111,11 @@ int main(int argc, char **argv) {
                         struct stat st; if (lstat(src,&st)!=0) { free(dst); continue; }
                         // handle conflict
                         if (path_exists(dst)) {
-                            char act = prompt_conflict_action(dst);
+                            char act = conflict_all ? conflict_action_all : prompt_conflict_action(dst);
+                            if (act=='O' || act=='R' || act=='S') { conflict_all = 1; conflict_action_all = (char)tolower(act); act = conflict_action_all; }
                             if (act=='s') { free(dst); continue; }
                             if (act=='r') { char *nd = gen_nonconflicting_path(dst); free(dst); dst = nd ? nd : NULL; if (!dst) continue; }
-                            else if (act=='o') { remove_tree(dst, NULL); }
+                            else if (act=='o') { remove_tree(dst, cache_abs); }
                         }
                         if (S_ISDIR(st.st_mode)) {
                             (void)copy_tree_with_progress(src, dst, &ui, root);
