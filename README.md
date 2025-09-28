@@ -7,9 +7,11 @@ Status: 0.24.0
 Features
 - Parallel scanning: deep work-queue with multiple threads (pthreads)
 - Responsive TUI: sortable by size or name (asc/desc), incremental search (f, n/N), filters (all/dirs/files and by query), preserved selection on back
+- Regex search: press F to enter a case-insensitive regex; use T to toggle the filter on/off (matching applies to entry names)
 - Persistent cache: saves scan results to .fastdu_cache_v2 at the root for reuse (stores path, size, last_scan, inode, dir_mtime)
 - Targeted refresh: automatic rescan of the hovered directory when modified (mtime)
 - Operations with marks: Space to mark/unmark; move (m), copy (c), delete (d) with incremental cache updates
+- Marks auto-clear after copy/move to avoid repeated or accidental operations
 - Copy/Move enhancements: conflict handling (overwrite/rename/skip) with apply-to-all (O/R/S), EXDEV fallback for move (copy+unlink) with progress bar
 - Progress bars: scanning (entries/tasks) and copy/move bytes progress
 - Footer info: totals (files/size), marked count, and last search query
@@ -41,6 +43,7 @@ TUI keys (highlights)
 - Search: f substring prompt (case-insensitive), F regex prompt (case-insensitive), n/N next/previous match (wraps around)
 - Rescan: r rescan selected dir, R rescan current dir (parallel)
 - Marks/ops: Space mark/unmark; m move marked; c copy marked; d delete marked (if any) else selected
+  - After successful copy/move, marked items are cleared automatically
   - During copy/move conflicts: o overwrite, r rename (with suffix), s skip; or O/R/S to apply to all
 - Help/quit: h help, q quit
 
