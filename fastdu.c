@@ -65,7 +65,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.23.0"
+#define FASTDU_VERSION "0.24.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -1188,6 +1188,7 @@ static void show_help(void) {
         "  r - rescan selected dir",
         "  R - rescan current dir",
         "  f - find by name (case-insensitive), n/N next/prev",
+        "  F - regex search (case-insensitive), enables query filter",
         "  t - toggle type filter (all/dirs/files)",
         "  T - toggle filter by query",
         "  SPACE - mark/unmark file/dir",
@@ -1198,6 +1199,14 @@ static void show_help(void) {
         "  s - toggle sort order (asc/desc)",
         "  q - quit",
         "  h - this help",
+        "",
+        "Regex guide:",
+        "  - Matching applies to the entry name only (not the full path)",
+        "  - Use 'F' to enter a regex; 'T' toggles the filter on/off",
+        "  Examples:",
+        "    • TXT files:       \\\.txt$",
+        "    • Only directories 'src' or 'docs':  ^(src|docs)$  then press 't' to 'dirs'",
+        "    • Names containing '2024-':          2024-",
         "",
         "CLI:",
         "  fastdu [-R|--reload] [-j N|--jobs N] [path]",

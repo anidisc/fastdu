@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-Status: 0.23.0
+Status: 0.24.0
 
 Features
 - Parallel scanning: deep work-queue with multiple threads (pthreads)
@@ -37,8 +37,8 @@ Options
 TUI keys (highlights)
 - Navigation: Up/Down or j/k; Enter/Right(l) to enter; Backspace/Left to go up; b/e to jump to top/end
 - View: o toggles sort key (size/name); s toggles order (asc/desc)
-- Filters: t cycles all/dirs/files; T toggles filter-by-query (uses last f query)
-- Search: f prompt, n/N next/previous match (wraps around)
+- Filters: t cycles all/dirs/files; T toggles filter-by-query (uses last f/F query)
+- Search: f substring prompt (case-insensitive), F regex prompt (case-insensitive), n/N next/previous match (wraps around)
 - Rescan: r rescan selected dir, R rescan current dir (parallel)
 - Marks/ops: Space mark/unmark; m move marked; c copy marked; d delete marked (if any) else selected
   - During copy/move conflicts: o overwrite, r rename (with suffix), s skip; or O/R/S to apply to all
@@ -67,6 +67,14 @@ Examples
 - Full reload with 8 workers: ./fastdu -R -j 8 /path/to/scan
 - Print version: ./fastdu -v
 - CLI help: ./fastdu -h
+
+Regex usage in TUI
+- Press F to enter a regex (case-insensitive) and enable the query filter. Press T to toggle it on/off.
+- Matching applies to entry names only (not the full path).
+- Examples:
+  - TXT files: \.txt$
+  - Only directories named src or docs: ^(src|docs)$ (then press t to switch to dirs)
+  - Names containing 2024-: 2024-
 
 Known limitations
 - Hard links to the same inode are not deduplicated across directories.
