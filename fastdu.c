@@ -58,6 +58,7 @@
 #include <stdatomic.h>
 #include <ctype.h>
 #include <signal.h>
+#include <regex.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -788,6 +789,8 @@ static const char *filter_mode_label(void) {
 
 // Search state
 static char g_search_query[256] = "";
+static int g_regex_enabled = 0;
+static regex_t g_regex;
 
 static int cmp_entries(const void *a, const void *b) {
     const ViewEntry *ea = (const ViewEntry*)a;
@@ -841,7 +844,13 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
         int include = 1;
         if (g_filter_mode == FILTER_DIRS && !is_dir) include = 0;
         if (g_filter_mode == FILTER_FILES && is_dir) include = 0;
-        if (g_filter_by_query && g_search_query[0] != '\0' && !strcasestr_bool(de->d_name, g_search_query)) include = 0;
+        if (g_filter_by_query) {
+            if (g_regex_enabled) {
+                if (regexec(&g_regex, de->d_name, 0, NULL, 0) != 0) include = 0;
+            } else {
+                if (g_search_query[0] != '\0' && !strcasestr_bool(de->d_name, g_search_query)) include = 0;
+            }
+        }
         if (!include) { free(abs); continue; }
         if (out->n == out->cap) {
             size_t newcap = out->cap ? out->cap * 2 : 128;
@@ -1868,7 +1877,7 @@ int main(int argc, char **argv) {
                 if (markset_has(&g_marks, ve->abs_path)) markset_remove(&g_marks, ve->abs_path);
                 else markset_add(&g_marks, ve->abs_path);
             }
-        } else if (ch == 'f' || ch == 'F') {
+        } else if (ch == 'f') {
             char q[256];
             if (prompt_input(q, sizeof(q), "Trova: ") > 0) {
                 strncpy(g_search_query, q, sizeof(g_search_query)); g_search_query[sizeof(g_search_query)-1]='\0';
@@ -1888,6 +1897,45 @@ int main(int argc, char **argv) {
                         if ((int)dv.selected < top) top = (int)dv.selected;
                     } else {
                         draw_status("Nessuna corrispondenza");
+                    }
+                }
+            }
+        } else if (ch == 'F') {
+            char q[256];
+            int got = prompt_input(q, sizeof(q), "Regex (case-insensitive): ");
+            if (got >= 0) {
+                if (q[0] == '\0') {
+                    // empty input: leave regex disabled, preserve existing query filter state
+                    g_regex_enabled = 0;
+                } else {
+                    // compile regex (case-insensitive, no submatches)
+                    regex_t re;
+                    int rc = regcomp(&re, q, REG_ICASE | REG_NOSUB);
+                    if (rc != 0) {
+                        char errbuf[256];
+                        regerror(rc, &re, errbuf, sizeof(errbuf));
+                        draw_status("Regex non valida");
+                    } else {
+                        if (g_regex_enabled) regfree(&g_regex);
+                        g_regex = re;
+                        g_regex_enabled = 1;
+                        // enable query filter and rebuild view
+                        char *sel_path = (dv.n > 0) ? xstrdup(dv.v[dv.selected].abs_path) : NULL;
+                        g_filter_by_query = 1;
+                        view_free(&dv);
+                        build_dir_view(current, root, &cache, &dv);
+                        if (dv.n == 0) {
+                            draw_status("Nessun elemento corrisponde alla regex");
+                        } else if (sel_path) {
+                            size_t new_idx = 0; int found = 0;
+                            for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
+                            if (found) dv.selected = new_idx; else dv.selected = 0;
+                        }
+                        int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+                        if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                        if ((int)dv.selected < top) top = (int)dv.selected;
+                        if (top < 0) top = 0;
+                        if (sel_path) free(sel_path);
                     }
                 }
             }
@@ -2236,6 +2284,7 @@ int main(int argc, char **argv) {
     view_free(&dv);
     cache_save(root, &cache);
     cache_free(&cache);
+    if (g_regex_enabled) { regfree(&g_regex); g_regex_enabled = 0; }
     free(cache_abs);
     return 0;
 }
