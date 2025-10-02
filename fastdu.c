@@ -65,7 +65,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.24.0"
+#define FASTDU_VERSION "0.25.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -760,17 +760,21 @@ static void view_free(DirView *dv) {
 }
 
 // Global sort mode
-typedef enum { SORT_SIZE = 0, SORT_NAME = 1 } SortMode;
+typedef enum { SORT_SIZE = 0, SORT_NAME = 1, SORT_MTIME = 2 } SortMode;
 static SortMode g_sort_mode = SORT_SIZE;
 static const char *sort_mode_label(void) {
-    return g_sort_mode == SORT_NAME ? "name" : "size";
+    switch (g_sort_mode) {
+        case SORT_NAME: return "name";
+        case SORT_MTIME: return "mtime";
+        default: return "size";
+    }
 }
 
 // Sort order flag
 static int g_sort_desc = 1; // 1=desc, 0=asc
 // Return sort label with order
 static void sort_label_with_order(char *out, size_t outsz) {
-    const char *key = (g_sort_mode == SORT_NAME) ? "name" : "size";
+    const char *key = sort_mode_label();
     const char *ord = g_sort_desc ? "desc" : "asc";
     snprintf(out, outsz, "%s %s", key, ord);
 }
@@ -799,6 +803,15 @@ static int cmp_entries(const void *a, const void *b) {
         // pure alphabetical with asc/desc toggle
         int c = strcmp(ea->name, eb->name);
         return g_sort_desc ? -c : c;
+    } else if (g_sort_mode == SORT_MTIME) {
+        // sort by modification time; newer first if desc
+        if (ea->mtime == eb->mtime) {
+            // stable tie-breaker by name
+            int c = strcmp(ea->name, eb->name);
+            return g_sort_desc ? -c : c;
+        }
+        if (g_sort_desc) return (ea->mtime < eb->mtime) ? 1 : -1; // newer first
+        else return (ea->mtime < eb->mtime) ? -1 : 1; // older first
     } else {
         // pure size with asc/desc toggle; unknown sizes last
         if (ea->size_known != eb->size_known) return eb->size_known - ea->size_known; // known first
@@ -840,6 +853,10 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
             if (dtype == DT_UNKNOWN) dtype = S_ISDIR(st.st_mode) ? DT_DIR : (S_ISREG(st.st_mode) ? DT_REG : DT_UNKNOWN);
         }
         int is_dir = (dtype == DT_DIR) ? 1 : 0;
+        // ensure we have stat info for directories too to get mtime
+        if (dtype == DT_DIR) {
+            if (lstat(abs, &st) != 0) { free(abs); continue; }
+        }
         // Filter
         int include = 1;
         if (g_filter_mode == FILTER_DIRS && !is_dir) include = 0;
@@ -862,7 +879,8 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
         ve->name = xstrdup(de->d_name);
         ve->abs_path = abs;
         ve->is_dir = is_dir;
-        if (dtype == DT_REG) ve->mtime = st.st_mtime; else ve->mtime = time(NULL);
+        // record mtime from stat for both files and directories
+        if (dtype == DT_REG || dtype == DT_DIR) ve->mtime = st.st_mtime; else ve->mtime = time(NULL);
         if (ve->is_dir) {
             CacheEntry *ce = cache_get(cache, ve->abs_path);
             if (ce) { ve->size = ce->size; ve->size_known = 1; }
@@ -1049,8 +1067,9 @@ static int compute_size_col_width(const DirView *dv) {
 /*
  * draw_list
  * ---------
- * Renders rows with columns: [mark] [size] [type] [name].
+ * Renders rows with columns: [mark] [size] [type] [name] [last modified].
  * - Sizes are right-aligned within a dynamic width.
+ * - Last modified timestamp is right-aligned and anchored to the right edge.
  * - Uses distinct colors for directories and files.
  * - Highlights the selected row with reverse + bold.
  */
@@ -1063,6 +1082,9 @@ static void draw_list(const DirView *dv, int top) {
     int size_col = 2; // mark + space
     int type_col = size_col + sizew + 1; // size + space
     int name_col = type_col + 2; // type char + space
+    // mtime column anchored to right: fixed width "YYYY-MM-DD HH:MM" (16)
+    const int mtimew = 16;
+    int mtime_col = cols - mtimew - 1; if (mtime_col < name_col + 4) mtime_col = name_col + 4;
 
     for (int i = 0; i < list_rows; i++) {
         int idx = top + i;
@@ -1093,10 +1115,19 @@ static void draw_list(const DirView *dv, int top) {
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
         // space after type
         mvaddch(y + i, type_col + 1, ' ');
-        // name uses remaining space
+        // name uses remaining space up to mtime column - 1
         if (ve->is_dir) attron(COLOR_PAIR(3)); else attron(COLOR_PAIR(4));
-        mvaddnstr(y + i, name_col, ve->name, cols - name_col - 1);
+        int name_max = mtime_col - name_col - 1; if (name_max < 0) name_max = 0;
+        mvaddnstr(y + i, name_col, ve->name, name_max);
         if (ve->is_dir) attroff(COLOR_PAIR(3)); else attroff(COLOR_PAIR(4));
+        // mtime right-aligned at mtime_col
+        char tbuf[32];
+        struct tm lt; localtime_r(&ve->mtime, &lt);
+        strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", &lt);
+        int tl = (int)strlen(tbuf);
+        int tpad = mtimew - tl; if (tpad < 0) tpad = 0;
+        if (tpad) { for (int k = 0; k < tpad; k++) mvaddch(y + i, mtime_col + k, ' '); }
+        mvaddnstr(y + i, mtime_col + tpad, tbuf, mtimew - tpad);
         if (is_sel) attroff(A_REVERSE | A_BOLD);
     }
 }
@@ -1195,7 +1226,7 @@ static void show_help(void) {
         "  m - move marked to current directory",
         "  c - copy marked to current directory (with progress)",
         "  d - delete marked (if any) else delete selected",
-        "  o - toggle sort key (size/name)",
+        "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
         "  q - quit",
         "  h - this help",
@@ -1985,10 +2016,11 @@ int main(int argc, char **argv) {
                 }
             }
         } else if (ch == 'o' || ch == 'O') {
-            // toggle sort key (size/name), keep selection on same path
+            // cycle sort key (size -> name -> mtime -> size), keep selection on same path
+            SortMode next_mode = (g_sort_mode == SORT_SIZE) ? SORT_NAME : (g_sort_mode == SORT_NAME ? SORT_MTIME : SORT_SIZE);
             if (dv.n > 0) {
                 char *sel_path = xstrdup(dv.v[dv.selected].abs_path);
-                g_sort_mode = (g_sort_mode == SORT_SIZE) ? SORT_NAME : SORT_SIZE;
+                g_sort_mode = next_mode;
                 view_free(&dv);
                 build_dir_view(current, root, &cache, &dv);
                 size_t new_idx = 0; int found = 0;
@@ -1996,7 +2028,7 @@ int main(int argc, char **argv) {
                 if (found) dv.selected = new_idx;
                 free(sel_path);
             } else {
-                g_sort_mode = (g_sort_mode == SORT_SIZE) ? SORT_NAME : SORT_SIZE;
+                g_sort_mode = next_mode;
             }
         } else if (ch == 't') {
             // toggle filter: all -> dirs -> files -> all (lowercase t)
