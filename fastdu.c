@@ -65,7 +65,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.26.5"
+#define FASTDU_VERSION "0.26.6"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -1532,8 +1532,15 @@ static void finalize_task(DirTask *t);
 
 static void enqueue_child(DirTask *parent, int cfd, const char *name) {
     DirTask *child = malloc(sizeof(DirTask));
+    if (!child) { close(cfd); return; }
     child->dirfd = cfd;
     child->abs_path = path_join(parent->abs_path, name);
+    if (!child->abs_path) {
+        // OOM or path error: skip this child safely
+        close(cfd);
+        free(child);
+        return;
+    }
     child->root = parent->root;
     child->cache_abs = parent->cache_abs;
     child->cache = parent->cache;
@@ -1594,7 +1601,9 @@ static void process_task(DirTask *t) {
     while ((de = readdir(dp)) != NULL) {
         if (is_dot_or_dotdot(de->d_name)) continue;
         atomic_fetch_add(&g_progress_count, 1ULL);
-        if (strcmp(t->abs_path, t->root) == 0 && strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
+        if (t->abs_path && t->root) {
+            if (strcmp(t->abs_path, t->root) == 0 && strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
+        }
         unsigned char dt = de->d_type;
         if (dt == DT_LNK) continue;
         if (dt == DT_UNKNOWN) {
@@ -1934,18 +1943,25 @@ int main(int argc, char **argv) {
                 ViewEntry *ve = &dv.v[dv.selected];
                 char *sel_path = xstrdup(ve->abs_path);
                 if (ve->is_dir) {
-                    int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
-                    if (threads < 1) threads = 1;
-                    if (threads > 64) threads = 64;
-                    (void)scan_dir_parallel_deep(ve->abs_path, cache_abs, &cache, threads);
-                    cache_save(root, &cache);
+                    // duplicate scan path to avoid relying on dv memory
+                    char *scan_path = xstrdup(ve->abs_path);
+                    if (scan_path) {
+                        int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
+                        if (threads < 1) threads = 1;
+                        if (threads > 64) threads = 64;
+                        (void)scan_dir_parallel_deep(scan_path, cache_abs, &cache, threads);
+                        free(scan_path);
+                        cache_save(root, &cache);
+                    }
                     // rebuild and reselect same path
                     size_t old_selected = dv.selected;
                     view_free(&dv);
                     build_dir_view(current, root, &cache, &dv);
                     // find index of sel_path
                     size_t new_idx = 0; int found = 0;
-                    for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
+                    if (sel_path) {
+                        for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
+                    }
                     if (found) dv.selected = new_idx; else dv.selected = (old_selected < dv.n ? old_selected : (dv.n ? dv.n-1 : 0));
                     // ensure visibility
                     int rows, cols; getmaxyx(stdscr, rows, cols);
@@ -1953,7 +1969,7 @@ int main(int argc, char **argv) {
                     if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                     if ((int)dv.selected < top) top = (int)dv.selected;
                 }
-                free(sel_path);
+                if (sel_path) free(sel_path);
             }
         } else if (ch == 'R') {
             int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
