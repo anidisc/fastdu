@@ -65,7 +65,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.26.0"
+#define FASTDU_VERSION "0.26.5"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -133,7 +133,7 @@ static int is_dot_or_dotdot(const char *name) {
  * - Writes into buf (size bufsz). Does not allocate.
  */
 static void human_size(unsigned long long v, char *buf, size_t bufsz) {
-    const char *units[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB"};
+    const char *units[] = {" B", "KB", "MB", "GB", "TB", "PB"};
     int i = 0;
     double d = (double)v;
     while (d >= 1024.0 && i < (int)(sizeof(units)/sizeof(units[0])) - 1) {
@@ -1222,19 +1222,15 @@ static int prompt_input(char *buf, size_t bufsz, const char *label) {
 
 static void show_help(void) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
-    int w = cols - 4; if (w < 40) w = cols - 2; if (w < 20) w = cols;
-    int h = rows - 6; if (h < 10) h = rows - 2; if (h < 5) h = rows;
+    int w = cols - 8; if (w < 48) w = cols - 4; if (w < 32) w = cols;
+    int h = rows - 8; if (h < 16) h = rows - 4; if (h < 8) h = rows;
     int x = (cols - w) / 2; if (x < 0) x = 0;
     int y = (rows - h) / 2; if (y < 0) y = 0;
-    // draw a simple box area
-    for (int i = 0; i < h; i++) {
-        mvhline(y + i, x, ' ', w);
-    }
-    attron(A_REVERSE);
-    mvaddnstr(y, x, " Help - press any key to close ", w);
-    attroff(A_REVERSE);
 
-    int line = y + 2;
+    // Create overlay window with border
+    WINDOW *win = newwin(h, w, y, x);
+    keypad(win, TRUE);
+
     const char *lines[] = {
         "Navigation:",
         "  Up/Down or j/k  - move selection",
@@ -1255,7 +1251,7 @@ static void show_help(void) {
         "  d - delete marked (if any) else delete selected",
         "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
-        "  i - alternate column info (mtime → owner+permissions → hidden)",
+        "  i - alterna colonna info (mtime → proprietario+permessi → nascosta)",
         "  q - quit",
         "  h - this help",
         "",
@@ -1271,12 +1267,40 @@ static void show_help(void) {
         "  fastdu [-R|--reload] [-j N|--jobs N] [path]",
         NULL
     };
-    for (int i = 0; lines[i]; i++) {
-        mvaddnstr(line++, x + 1, lines[i], w - 2);
-        if (line >= y + h - 1) break;
+
+    // Count lines
+    int total_lines = 0; while (lines[total_lines]) total_lines++;
+    int view_lines = h - 2; if (view_lines < 1) view_lines = 1;
+    int off = 0;
+
+    // Draw loop
+    for (;;) {
+        werase(win);
+        box(win, 0, 0);
+        // Title
+        wattron(win, A_REVERSE | A_BOLD);
+        const char *title = " Help - arrows to scroll, q to close ";
+        mvwaddnstr(win, 0, 2, title, w - 4);
+        wattroff(win, A_REVERSE | A_BOLD);
+        // Content area
+        for (int i = 0; i < view_lines; i++) {
+            int li = off + i;
+            if (li >= total_lines) break;
+            mvwaddnstr(win, 1 + i, 2, lines[li], w - 4);
+        }
+        wrefresh(win);
+        int ch = wgetch(win);
+        if (ch == 'q' || ch == 'Q') break;
+        else if (ch == KEY_UP) { if (off > 0) off--; }
+        else if (ch == KEY_DOWN) { if (off + view_lines < total_lines) off++; }
+        else if (ch == KEY_PPAGE) { off -= view_lines; if (off < 0) off = 0; }
+        else if (ch == KEY_NPAGE) { off += view_lines; if (off + view_lines > total_lines) off = (total_lines > view_lines) ? (total_lines - view_lines) : 0; }
+        else if (ch == 'k') { if (off > 0) off--; }
+        else if (ch == 'j') { if (off + view_lines < total_lines) off++; }
     }
-    refresh();
-    getch();
+
+    delwin(win);
+    // Underlying screen will be redrawn by main loop on return
 }
 
 static int confirm_delete_prompt(const char *name, int is_dir) {
