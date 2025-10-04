@@ -59,13 +59,13 @@
 #include <ctype.h>
 #include <signal.h>
 #include <regex.h>
-
+#include <pwd.h>
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.25.0"
+#define FASTDU_VERSION "0.26.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -796,6 +796,13 @@ static char g_search_query[256] = "";
 static int g_regex_enabled = 0;
 static regex_t g_regex;
 
+// Info column display mode
+// - mtime: show last modification time
+// - owner+perm: show owner and octal permissions
+// - hidden: hide the right column entirely
+typedef enum { INFOCOL_MTIME = 0, INFOCOL_OWNER_PERM = 1, INFOCOL_HIDDEN = 2 } InfoColMode;
+static InfoColMode g_info_col_mode = INFOCOL_MTIME;
+
 static int cmp_entries(const void *a, const void *b) {
     const ViewEntry *ea = (const ViewEntry*)a;
     const ViewEntry *eb = (const ViewEntry*)b;
@@ -1063,6 +1070,20 @@ static int compute_size_col_width(const DirView *dv) {
     return w;
 }
 
+// Format owner and permissions (octal) for a path into out buffer.
+// Example: "user 0755"; falls back to numeric uid if name not found.
+static void format_owner_perm(const char *path, char *out, size_t outsz) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        snprintf(out, outsz, "-");
+        return;
+    }
+    struct passwd *pw = getpwuid(st.st_uid);
+    const char *uname = pw && pw->pw_name ? pw->pw_name : NULL;
+    unsigned mode_octal = (unsigned)(st.st_mode & 07777);
+    if (uname) snprintf(out, outsz, "%s %04o", uname, mode_octal);
+    else snprintf(out, outsz, "%u %04o", (unsigned)st.st_uid, mode_octal);
+}
 
 /*
  * draw_list
@@ -1082,9 +1103,10 @@ static void draw_list(const DirView *dv, int top) {
     int size_col = 2; // mark + space
     int type_col = size_col + sizew + 1; // size + space
     int name_col = type_col + 2; // type char + space
-    // mtime column anchored to right: fixed width "YYYY-MM-DD HH:MM" (16)
-    const int mtimew = 16;
-    int mtime_col = cols - mtimew - 1; if (mtime_col < name_col + 4) mtime_col = name_col + 4;
+    // Right column anchored to right; width depends on mode
+    const int info_w_default = 16; // matches "YYYY-MM-DD HH:MM"
+    int info_w = (g_info_col_mode == INFOCOL_HIDDEN) ? 0 : info_w_default;
+    int info_col = cols - info_w - 1; if (info_col < name_col + 4) info_col = name_col + 4;
 
     for (int i = 0; i < list_rows; i++) {
         int idx = top + i;
@@ -1099,9 +1121,7 @@ static void draw_list(const DirView *dv, int top) {
         char sizebuf[64];
         if (ve->size_known) human_size(ve->size, sizebuf, sizeof(sizebuf));
         else snprintf(sizebuf, sizeof(sizebuf), "?");
-        // draw size right-aligned in its column
-        char sizefmt[32]; snprintf(sizefmt, sizeof(sizefmt), " %%-%ds", sizew); // left pad by printing into fixed area then align by mvaddnstr with right shift
-        // To ensure right alignment, compute padding
+        // right-align size in its column
         int l = (int)strlen(sizebuf);
         int pad = sizew - l; if (pad < 0) pad = 0;
         // mark column
@@ -1115,19 +1135,26 @@ static void draw_list(const DirView *dv, int top) {
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
         // space after type
         mvaddch(y + i, type_col + 1, ' ');
-        // name uses remaining space up to mtime column - 1
+        // name uses remaining space up to right column - 1 (or full width if hidden)
         if (ve->is_dir) attron(COLOR_PAIR(3)); else attron(COLOR_PAIR(4));
-        int name_max = mtime_col - name_col - 1; if (name_max < 0) name_max = 0;
+        int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - 1) : (info_col - name_col - 1);
+        if (name_max < 0) name_max = 0;
         mvaddnstr(y + i, name_col, ve->name, name_max);
         if (ve->is_dir) attroff(COLOR_PAIR(3)); else attroff(COLOR_PAIR(4));
-        // mtime right-aligned at mtime_col
-        char tbuf[32];
-        struct tm lt; localtime_r(&ve->mtime, &lt);
-        strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", &lt);
-        int tl = (int)strlen(tbuf);
-        int tpad = mtimew - tl; if (tpad < 0) tpad = 0;
-        if (tpad) { for (int k = 0; k < tpad; k++) mvaddch(y + i, mtime_col + k, ' '); }
-        mvaddnstr(y + i, mtime_col + tpad, tbuf, mtimew - tpad);
+        // right column content
+        if (g_info_col_mode != INFOCOL_HIDDEN) {
+            char ibuf[64];
+            if (g_info_col_mode == INFOCOL_MTIME) {
+                struct tm lt; localtime_r(&ve->mtime, &lt);
+                strftime(ibuf, sizeof(ibuf), "%Y-%m-%d %H:%M", &lt);
+            } else {
+                format_owner_perm(ve->abs_path, ibuf, sizeof(ibuf));
+            }
+            int il = (int)strlen(ibuf);
+            int ipad = info_w - il; if (ipad < 0) ipad = 0;
+            if (ipad) { for (int k = 0; k < ipad; k++) mvaddch(y + i, info_col + k, ' '); }
+            mvaddnstr(y + i, info_col + ipad, ibuf, info_w - ipad);
+        }
         if (is_sel) attroff(A_REVERSE | A_BOLD);
     }
 }
@@ -1228,6 +1255,7 @@ static void show_help(void) {
         "  d - delete marked (if any) else delete selected",
         "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
+        "  i - alternate column info (mtime → owner+permissions → hidden)",
         "  q - quit",
         "  h - this help",
         "",
@@ -2030,6 +2058,10 @@ int main(int argc, char **argv) {
             } else {
                 g_sort_mode = next_mode;
             }
+        } else if (ch == 'i' || ch == 'I') {
+            // cycle info column (mtime -> owner+perm -> hidden -> mtime)
+            g_info_col_mode = (g_info_col_mode == INFOCOL_MTIME) ? INFOCOL_OWNER_PERM : (g_info_col_mode == INFOCOL_OWNER_PERM ? INFOCOL_HIDDEN : INFOCOL_MTIME);
+            // redraw on next loop
         } else if (ch == 't') {
             // toggle filter: all -> dirs -> files -> all (lowercase t)
             if (dv.n > 0) {

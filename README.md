@@ -8,6 +8,7 @@ Features
 - Parallel scanning: deep work-queue with multiple threads (pthreads)
 - Responsive TUI: sortable by size, name or last modified (mtime) with asc/desc; incremental search (f, n/N); filters (all/dirs/files and by query); preserved selection on back
 - Right-aligned Last Modified column: shows YYYY-MM-DD HH:MM anchored to the right edge
+- Info column toggle (i): cycle between Last Modified (mtime), owner + octal permissions (e.g. "anidisc 0755"), or hidden
 - Regex search: press F to enter a case-insensitive regex; use T to toggle the filter on/off (matching applies to entry names)
 - Persistent cache: saves scan results to .fastdu_cache_v2 at the root for reuse (stores path, size, last_scan, inode, dir_mtime)
 - Targeted refresh: automatic rescan of the hovered directory when modified (mtime)
@@ -40,6 +41,7 @@ Options
 TUI keys (highlights)
 - Navigation: Up/Down or j/k; Enter/Right(l) to enter; Backspace/Left to go up; b/e to jump to top/end
 - View: o toggles sort key (size/name/mtime); s toggles order (asc/desc)
+- Info: i toggles right info column (mtime → owner+perm → hidden)
 - Filters: t cycles all/dirs/files; T toggles filter-by-query (uses last f/F query)
 - Search: f substring prompt (case-insensitive), F regex prompt (case-insensitive), n/N next/previous match (wraps around)
 - Rescan: r rescan selected dir, R rescan current dir (parallel)
