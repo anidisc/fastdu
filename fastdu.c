@@ -65,7 +65,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.28.2"
+#define FASTDU_VERSION "0.29.1"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -925,6 +925,8 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
     }
     closedir(dp);
     qsort(out->v, out->n, sizeof(ViewEntry), cmp_entries);
+    // Update footer files counter to reflect current directory view size
+    g_last_files = (unsigned long long)out->n;
     return 0;
 }
 
