@@ -65,7 +65,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.29.1"
+#define FASTDU_VERSION "0.29.3"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -393,6 +393,34 @@ static CacheEntry *cache_upsert(Cache *c, const char *root, const char *abs_path
     }
     pthread_mutex_unlock(&c->mu);
     return out;
+}
+
+static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_path,
+                                   unsigned long long size, time_t now,
+                                   unsigned long long ino, time_t dir_mtime) {
+    pthread_mutex_lock(&c->mu);
+    ssize_t idx = cache_find_index_nl(c, abs_path);
+    if (idx >= 0) {
+        c->v[idx].size = size;
+        c->v[idx].last_scan = now;
+        c->v[idx].ino = ino;
+        c->v[idx].dir_mtime = dir_mtime;
+    } else {
+        if (c->n == c->cap) {
+            size_t newcap = c->cap ? c->cap * 2 : 256;
+            void *nv = realloc(c->v, newcap * sizeof(CacheEntry));
+            if (!nv) { pthread_mutex_unlock(&c->mu); return; }
+            c->v = (CacheEntry*)nv; c->cap = newcap;
+        }
+        CacheEntry *e = &c->v[c->n++];
+        e->abs_path = xstrdup(abs_path);
+        e->rel_path = relpath_from_abs(root, abs_path);
+        e->size = size;
+        e->last_scan = now;
+        e->ino = ino;
+        e->dir_mtime = dir_mtime;
+    }
+    pthread_mutex_unlock(&c->mu);
 }
 
 /*
@@ -1708,8 +1736,10 @@ typedef struct DirTask {
     atomic_ullong files_size;
     atomic_ullong children_size;
     atomic_int pending;
+    atomic_int finalized;
     WaitGroupC *wg;
     TaskQueue *q;
+    TaskQueue *finalq; // queue for finalizer thread
 } DirTask;
 
 static void finalize_task(DirTask *t);
@@ -1731,10 +1761,14 @@ static void enqueue_child(DirTask *parent, int cfd, const char *name) {
     child->parent = parent;
     atomic_store(&child->files_size, 0ULL);
     atomic_store(&child->children_size, 0ULL);
-    atomic_store(&child->pending, 0);
+    // Initialize child's pending to 1 to account for its own processing phase
+    atomic_store(&child->pending, 1);
+    atomic_store(&child->finalized, 0);
     child->wg = parent->wg;
     child->q = parent->q;
+    child->finalq = parent->finalq;
     wg_add(parent->wg, 1);
+    // Increment parent's pending for this child
     atomic_fetch_add(&parent->pending, 1);
     tq_push(parent->q, child);
 }
@@ -1748,13 +1782,14 @@ static void enqueue_child(DirTask *parent, int cfd, const char *name) {
  */
 static void finalize_task(DirTask *t) {
     if (atomic_load(&t->pending) != 0) return;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&t->finalized, &expected, 1)) return;
     unsigned long long total = atomic_load(&t->files_size) + atomic_load(&t->children_size);
     struct stat stc;
     if (fstat(t->dirfd, &stc) == 0) {
-        CacheEntry *e = cache_upsert(t->cache, t->root, t->abs_path, total, time(NULL));
-        if (e) { e->ino = (unsigned long long)stc.st_ino; e->dir_mtime = stc.st_mtime; }
+        cache_upsert_with_meta(t->cache, t->root, t->abs_path, total, time(NULL), (unsigned long long)stc.st_ino, stc.st_mtime);
     } else {
-        cache_upsert(t->cache, t->root, t->abs_path, total, time(NULL));
+        cache_upsert_with_meta(t->cache, t->root, t->abs_path, total, time(NULL), 0ULL, 0);
     }
     if (t->parent) {
         atomic_fetch_add(&t->parent->children_size, total);
@@ -1813,13 +1848,18 @@ static void process_task(DirTask *t) {
         }
     }
     closedir(dp);
-    finalize_task(t);
+    // Mark this task's processing phase done; enqueue for finalization if pending reaches zero
+    if (atomic_fetch_sub(&t->pending, 1) == 1) {
+        tq_push(t->finalq, t);
+    }
 }
 
 typedef struct {
     TaskQueue q;
+    TaskQueue finq;
     int threads;
     pthread_t *th;
+    pthread_t fin_th;
     WaitGroupC wg;
 } ScanPool;
 
@@ -1835,6 +1875,35 @@ static void *worker_loop(void *arg) {
     return NULL;
 }
 
+static void *finalizer_loop(void *arg) {
+    ScanPool *p = (ScanPool*)arg;
+    for (;;) {
+        DirTask *t = (DirTask*)tq_pop(&p->finq);
+        if (!t) break;
+        // finalize t (pending already 0)
+        unsigned long long total = atomic_load(&t->files_size) + atomic_load(&t->children_size);
+        struct stat stc;
+        if (fstat(t->dirfd, &stc) == 0) {
+            cache_upsert_with_meta(t->cache, t->root, t->abs_path, total, time(NULL), (unsigned long long)stc.st_ino, stc.st_mtime);
+        } else {
+            cache_upsert_with_meta(t->cache, t->root, t->abs_path, total, time(NULL), 0ULL, 0);
+        }
+        // propagate to parent
+        if (t->parent) {
+            atomic_fetch_add(&t->parent->children_size, total);
+            if (atomic_fetch_sub(&t->parent->pending, 1) == 1) {
+                tq_push(&p->finq, t->parent);
+            }
+        }
+        WaitGroupC *wgptr = t->wg;
+        close(t->dirfd);
+        free(t->abs_path);
+        free(t);
+        wg_done(wgptr);
+    }
+    return NULL;
+}
+
 /*
  * scan_dir_parallel_deep
  * ----------------------
@@ -1844,8 +1913,11 @@ static void *worker_loop(void *arg) {
  * the main thread. Returns the total size of the scan root.
  */
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads) {
-    ScanPool p; tq_init(&p.q, 4096); p.threads = threads; p.th = malloc((size_t)threads * sizeof(pthread_t)); wg_init(&p.wg);
+    ScanPool p; tq_init(&p.q, 4096); tq_init(&p.finq, 4096);
+    p.threads = threads; p.th = malloc((size_t)threads * sizeof(pthread_t)); wg_init(&p.wg);
+    // start workers and finalizer
     for (int i = 0; i < threads; i++) pthread_create(&p.th[i], NULL, worker_loop, &p);
+    pthread_create(&p.fin_th, NULL, finalizer_loop, &p);
 
     atomic_store(&g_progress_count, 0ULL);
     atomic_store(&g_active_workers, 0);
@@ -1855,13 +1927,16 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     if (fd < 0) { tq_close(&p.q); for (int i = 0; i < threads; i++) pthread_join(p.th[i], NULL); tq_destroy(&p.q); free(p.th); return 0ULL; }
     DirTask *rt = malloc(sizeof(DirTask));
     rt->dirfd = fd; rt->abs_path = xstrdup(root); rt->root = root; rt->cache_abs = cache_abs; rt->cache = cache; rt->parent = NULL;
-    atomic_store(&rt->files_size, 0ULL); atomic_store(&rt->children_size, 0ULL); atomic_store(&rt->pending, 0);
-    rt->wg = &p.wg; rt->q = &p.q;
+    atomic_store(&rt->files_size, 0ULL); atomic_store(&rt->children_size, 0ULL);
+    // Initialize pending to 1 (self processing), children will add more
+    atomic_store(&rt->pending, 1);
+    atomic_store(&rt->finalized, 0);
+    rt->wg = &p.wg; rt->q = &p.q; rt->finalq = &p.finq;
     wg_add(&p.wg, 1);
     tq_push(&p.q, rt);
 
     // Progress loop (UI updated from main thread)
-ScanUI ui = { .enabled = 1, .count = 0, .phase = "Scanning" };
+    ScanUI ui = { .enabled = (g_tui_active ? 1 : 0), .count = 0, .phase = "Scanning" };
     clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
     struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 50 * 1000 * 1000; // 50ms
     while (wg_value(&p.wg) > 0) {
@@ -1874,9 +1949,12 @@ ScanUI ui = { .enabled = 1, .count = 0, .phase = "Scanning" };
         nanosleep(&ts, NULL);
     }
 
+    // shut down queues and threads
     tq_close(&p.q);
     for (int i = 0; i < threads; i++) pthread_join(p.th[i], NULL);
-    tq_destroy(&p.q); free(p.th);
+    tq_close(&p.finq);
+    pthread_join(p.fin_th, NULL);
+    tq_destroy(&p.q); tq_destroy(&p.finq); free(p.th);
 
     // Clear progress line
     int cols, rows; getmaxyx(stdscr, rows, cols);
@@ -1989,32 +2067,40 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    int headless = !(isatty(STDIN_FILENO) && isatty(STDOUT_FILENO));
+
     char root[PATH_MAX];
     if (!realpath(root_in, root)) {
 fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         return 1;
     }
 
-    // TUI setup early to show progress
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    curs_set(0);
-    g_tui_active = 1;
-    atexit(restore_terminal_on_exit);
-    install_signal_handlers();
-#ifdef NCURSES_VERSION
-    set_escdelay(25);
-#endif
-    if (has_colors()) {
-        start_color();
-#ifdef NCURSES_VERSION
-        use_default_colors();
-#endif
-        init_pair(1, COLOR_BLACK, COLOR_CYAN);   // header/footer
-        init_pair(3, COLOR_CYAN, COLOR_BLACK);   // dirs
-        init_pair(4, COLOR_WHITE, COLOR_BLACK);  // files
+    // TTY / headless setup
+    if (!headless) {
+        // TUI setup early to show progress
+        initscr();
+        cbreak();
+        noecho();
+        keypad(stdscr, TRUE);
+        curs_set(0);
+        g_tui_active = 1;
+        atexit(restore_terminal_on_exit);
+        const char *asan_env = getenv("ASAN_OPTIONS");
+        if (!asan_env || !asan_env[0]) {
+            install_signal_handlers();
+        }
+    #ifdef NCURSES_VERSION
+        set_escdelay(25);
+    #endif
+        if (has_colors()) {
+            start_color();
+    #ifdef NCURSES_VERSION
+            use_default_colors();
+    #endif
+            init_pair(1, COLOR_BLACK, COLOR_CYAN);   // header/footer
+            init_pair(3, COLOR_CYAN, COLOR_BLACK);   // dirs
+            init_pair(4, COLOR_WHITE, COLOR_BLACK);  // files
+        }
     }
 
     // Prepare cache (load or full rescan)
@@ -2024,21 +2110,36 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     char *cache_abs = path_join(root, CACHE_FILENAME);
 
     if (!have_cache || reload_flag) {
-        erase();
-        draw_header(root, root, &cache);
-        refresh();
+        if (!headless) {
+            erase();
+            draw_header(root, root, &cache);
+            refresh();
+        }
         int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
         if (threads < 1) threads = 1;
         if (threads > 64) threads = 64;
         (void)scan_dir_parallel_deep(root, cache_abs, &cache, threads);
         cache_save(root, &cache);
-        int cols, rows; getmaxyx(stdscr, rows, cols);
-        mvhline(rows-1, 0, ' ', cols);
-        refresh();
+        if (!headless) {
+            int cols, rows; getmaxyx(stdscr, rows, cols);
+            mvhline(rows-1, 0, ' ', cols);
+            refresh();
+        }
     } else {
         // Cache loaded: set footer totals from cache root entry (v2/v3)
         CacheEntry *root_ce = cache_get(&cache, root);
         if (root_ce) g_last_bytes = root_ce->size; else g_last_bytes = 0ULL;
+    }
+
+    if (headless) {
+        // In headless mode, if -R was requested we already rescanned; otherwise we may have loaded cache.
+        // Print a short summary and exit.
+        printf("fastdu %s\n", FASTDU_VERSION);
+        printf("root: %s\n", root);
+        printf("files: %llu\n", (unsigned long long)g_last_files);
+        printf("size: %llu bytes\n", (unsigned long long)g_last_bytes);
+        cache_free(&cache);
+        return 0;
     }
 
     DirView dv = (DirView){0};
