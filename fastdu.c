@@ -64,8 +64,11 @@
 #define PATH_MAX 4096
 #endif
 
+// Forward declaration for TUI active flag used before its definition
+static volatile sig_atomic_t g_tui_active;
+
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.29.3"
+#define FASTDU_VERSION "0.29.4"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -2129,6 +2132,12 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         // Cache loaded: set footer totals from cache root entry (v2/v3)
         CacheEntry *root_ce = cache_get(&cache, root);
         if (root_ce) g_last_bytes = root_ce->size; else g_last_bytes = 0ULL;
+        // If the loaded cache (older versions) didn't persist totals_files, compute once and persist
+        if (g_last_files == 0ULL) {
+            unsigned long long files_cnt = count_files_path(root);
+            g_last_files = files_cnt;
+            cache_save(root, &cache);
+        }
     }
 
     if (headless) {
@@ -2235,6 +2244,8 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                     // compute old size and preserve current global total
                     unsigned long long old_sz = 0ULL; CacheEntry *ce_old = cache_get(&cache, ve->abs_path); if (ce_old) old_sz = ce_old->size;
                     unsigned long long prev_total = g_last_bytes;
+                    // compute old files count for delta adjustment
+                    unsigned long long old_files = count_files_path(ve->abs_path);
                     // duplicate scan path to avoid relying on dv memory
                     char *scan_path = xstrdup(ve->abs_path);
                     if (scan_path) {
@@ -2251,6 +2262,13 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                         // restore footer total by applying delta to previous total (partial scan overwrote it)
                         if (delta >= 0) g_last_bytes = prev_total + (unsigned long long)delta;
                         else { unsigned long long dec = (unsigned long long)(-delta); g_last_bytes = (prev_total > dec) ? (prev_total - dec) : 0ULL; }
+                        // adjust global files by delta between new and old subtree file counts
+                        unsigned long long new_files = count_files_path(ve->abs_path);
+                        if (new_files >= old_files) g_last_files += (new_files - old_files);
+                        else {
+                            unsigned long long decf = old_files - new_files;
+                            if (g_last_files > decf) g_last_files -= decf; else g_last_files = 0ULL;
+                        }
                         cache_save(root, &cache);
                     }
                 }
@@ -2600,9 +2618,14 @@ draw_status("No items marked.");
                             CacheEntry *ced = cache_get(&cache, dst);
                             unsigned long long dsz = ced ? ced->size : sum_path_size(dst);
                             cache_add_ancestors_after_delta(&cache, root, dst, dsz);
+                            // increment global files by files copied under dst
+                            unsigned long long finc = count_files_path(dst);
+                            g_last_files += finc;
                         } else if (S_ISREG(st.st_mode)) {
                             (void)copy_file_with_progress(src, dst, &ui);
                             cache_add_ancestors_after_delta(&cache, root, dst, (unsigned long long)st.st_size);
+                            // increment global files by one regular file
+                            g_last_files += 1ULL;
                         }
                         free(dst);
                     }
