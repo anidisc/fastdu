@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.30"
+#define FASTDU_VERSION "0.30.1"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -1766,9 +1766,43 @@ static void tq_destroy(TaskQueue *q) {
     pthread_cond_destroy(&q->cv_nonempty);
     pthread_cond_destroy(&q->cv_nonfull);
 }
+
+static size_t tq_count(TaskQueue *q) {
+    pthread_mutex_lock(&q->mu);
+    size_t c = q->count;
+    pthread_mutex_unlock(&q->mu);
+    return c;
+}
+
+static size_t tq_capacity(TaskQueue *q) {
+    pthread_mutex_lock(&q->mu);
+    size_t c = q->cap;
+    pthread_mutex_unlock(&q->mu);
+    return c;
+}
 static int tq_push(TaskQueue *q, void *item) {
     pthread_mutex_lock(&q->mu);
     while (q->count == q->cap && !q->closed) pthread_cond_wait(&q->cv_nonfull, &q->mu);
+    if (q->closed) { pthread_mutex_unlock(&q->mu); return 0; }
+    q->items[q->tail] = item; q->tail = (q->tail + 1) % q->cap; q->count++;
+    pthread_cond_signal(&q->cv_nonempty);
+    pthread_mutex_unlock(&q->mu);
+    return 1;
+}
+
+// Timed push variant to avoid potential stalls under extreme load
+static int tq_push_timed(TaskQueue *q, void *item, int timeout_ms) {
+    struct timespec abstime;
+    clock_gettime(CLOCK_REALTIME, &abstime);
+    long ns = abstime.tv_nsec + (long)timeout_ms * 1000000L;
+    abstime.tv_sec += ns / 1000000000L;
+    abstime.tv_nsec = ns % 1000000000L;
+
+    pthread_mutex_lock(&q->mu);
+    while (q->count == q->cap && !q->closed) {
+        int rc = pthread_cond_timedwait(&q->cv_nonfull, &q->mu, &abstime);
+        if (rc == ETIMEDOUT) { pthread_mutex_unlock(&q->mu); return 0; }
+    }
     if (q->closed) { pthread_mutex_unlock(&q->mu); return 0; }
     q->items[q->tail] = item; q->tail = (q->tail + 1) % q->cap; q->count++;
     pthread_cond_signal(&q->cv_nonempty);
@@ -1883,9 +1917,21 @@ static void finalize_task(DirTask *t) {
  */
 static void process_task(DirTask *t) {
     int dupfd = dup(t->dirfd);
-    if (dupfd < 0) { finalize_task(t); return; }
+    if (dupfd < 0) {
+        // Cannot process: mark processing phase done and finalize
+        if (atomic_fetch_sub(&t->pending, 1) == 1) {
+            if (!tq_push_timed(t->finalq, t, 2000)) finalize_task(t);
+        }
+        return;
+    }
     DIR *dp = fdopendir(dupfd);
-    if (!dp) { close(dupfd); finalize_task(t); return; }
+    if (!dp) {
+        close(dupfd);
+        if (atomic_fetch_sub(&t->pending, 1) == 1) {
+            if (!tq_push_timed(t->finalq, t, 2000)) finalize_task(t);
+        }
+        return;
+    }
     struct dirent *de;
     while ((de = readdir(dp)) != NULL) {
         if (is_dot_or_dotdot(de->d_name)) continue;
@@ -1920,7 +1966,10 @@ static void process_task(DirTask *t) {
     closedir(dp);
     // Mark this task's processing phase done; enqueue for finalization if pending reaches zero
     if (atomic_fetch_sub(&t->pending, 1) == 1) {
-        tq_push(t->finalq, t);
+        // Try to enqueue for finalization; if queue is saturated and doesn't free within 2s, finalize inline
+        if (!tq_push_timed(t->finalq, t, 2000)) {
+            finalize_task(t);
+        }
     }
 }
 
@@ -1962,7 +2011,10 @@ static void *finalizer_loop(void *arg) {
         if (t->parent) {
             atomic_fetch_add(&t->parent->children_size, total);
             if (atomic_fetch_sub(&t->parent->pending, 1) == 1) {
-                tq_push(&p->finq, t->parent);
+                if (!tq_push_timed(&p->finq, t->parent, 2000)) {
+                    // Fallback finalize parent inline to avoid potential stall
+                    finalize_task(t->parent);
+                }
             }
         }
         WaitGroupC *wgptr = t->wg;
@@ -1983,7 +2035,7 @@ static void *finalizer_loop(void *arg) {
  * the main thread. Returns the total size of the scan root.
  */
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads) {
-    ScanPool p; tq_init(&p.q, 4096); tq_init(&p.finq, 4096);
+    ScanPool p; tq_init(&p.q, 16384); tq_init(&p.finq, 16384);
     p.threads = threads; p.th = malloc((size_t)threads * sizeof(pthread_t)); wg_init(&p.wg);
     // start workers and finalizer
     for (int i = 0; i < threads; i++) pthread_create(&p.th[i], NULL, worker_loop, &p);
@@ -2005,10 +2057,12 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     wg_add(&p.wg, 1);
     tq_push(&p.q, rt);
 
-    // Progress loop (UI updated from main thread)
+    // Progress loop with optional stall monitor (enabled if FASTDU_DEBUG_SCAN=1 or headless)
     ScanUI ui = { .enabled = (g_tui_active ? 1 : 0), .count = 0, .phase = "Scanning" };
     clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
     struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 50 * 1000 * 1000; // 50ms
+    const char *dbg = getenv("FASTDU_DEBUG_SCAN");
+    unsigned long long last_prog = 0ULL; time_t last_prog_ts = time(NULL);
     while (wg_value(&p.wg) > 0) {
         ui.count = atomic_load(&g_progress_count);
         ui.active = atomic_load(&g_active_workers);
@@ -2016,6 +2070,20 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
         ui.files = atomic_load(&g_total_files);
         ui.bytes = atomic_load(&g_total_bytes);
         draw_progress_ui(&ui, root);
+        if (ui.count != last_prog) { last_prog = ui.count; last_prog_ts = time(NULL); }
+        else {
+            time_t now = time(NULL);
+            if ((dbg || !ui.enabled) && now - last_prog_ts >= 20) {
+                // print a heartbeat to stderr every 20s without progress
+                fprintf(stderr, "[fastdu] stall? cnt=%llu active=%d wg=%d q=%zu/%zu finq=%zu/%zu files=%llu bytes=%llu path=%s\n",
+                        (unsigned long long)ui.count, ui.active, ui.pending,
+                        (size_t)tq_count(&p.q), (size_t)tq_capacity(&p.q),
+                        (size_t)tq_count(&p.finq), (size_t)tq_capacity(&p.finq),
+                        (unsigned long long)ui.files, (unsigned long long)ui.bytes,
+                        root);
+                last_prog_ts = now; // avoid spamming
+            }
+        }
         nanosleep(&ts, NULL);
     }
 
