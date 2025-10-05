@@ -65,7 +65,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.26.7"
+#define FASTDU_VERSION "0.28.2"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -225,7 +225,7 @@ static char *gen_nonconflicting_path(const char *dst) {
 static char prompt_conflict_action(const char *dst) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
     char msg[PATH_MAX + 256];
-    snprintf(msg, sizeof(msg), "Conflitto su '%s': [o]verwrite, [r]ename, [s]kip, [O] overwrite all, [R] rename all, [S] skip all ", dst);
+snprintf(msg, sizeof(msg), "Conflict on '%s': [o]verwrite, [r]ename, [s]kip, [O] overwrite all, [R] rename all, [S] skip all ", dst);
     mvhline(rows-1, 0, ' ', cols);
     mvaddnstr(rows-1, 0, msg, cols-1);
     refresh();
@@ -813,12 +813,19 @@ static char g_search_query[256] = "";
 static int g_regex_enabled = 0;
 static regex_t g_regex;
 
-// Info column display mode
+// Info column display mode (non-space info)
 // - mtime: show last modification time
 // - owner+perm: show owner and octal permissions
 // - hidden: hide the right column entirely
 typedef enum { INFOCOL_MTIME = 0, INFOCOL_OWNER_PERM = 1, INFOCOL_HIDDEN = 2 } InfoColMode;
 static InfoColMode g_info_col_mode = INFOCOL_MTIME;
+
+// Space display mode for right column (overrides info mode when active)
+// - OFF: do not show right column
+// - NUM: show per-entry human size
+// - PCT: show per-entry percentage of total size in current view
+typedef enum { DISP_OFF = 0, DISP_NUM = 1, DISP_PCT = 2 } DisplayMode;
+static DisplayMode g_display_mode = DISP_NUM;
 
 static int cmp_entries(const void *a, const void *b) {
     const ViewEntry *ea = (const ViewEntry*)a;
@@ -1075,6 +1082,12 @@ static void draw_header(const char *root, const char *cur) {
 }
 
 static int compute_size_col_width(const DirView *dv) {
+    // Display mode controls left size column width
+    if (g_display_mode == DISP_OFF) return 0;
+    if (g_display_mode == DISP_PCT) {
+        // "100.0%" fits in 7 chars; keep a minimum width of 6
+        return 7;
+    }
     int w = 1;
     for (size_t i = 0; i < dv->n; i++) {
         char b[64];
@@ -1118,12 +1131,21 @@ static void draw_list(const DirView *dv, int top) {
     int sizew = compute_size_col_width(dv);
     int mark_col = 0; // mark column at 0
     int size_col = 2; // mark + space
-    int type_col = size_col + sizew + 1; // size + space
+    int type_col = size_col + (sizew > 0 ? (sizew + 1) : 0); // if size hidden, no gap
     int name_col = type_col + 2; // type char + space
-    // Right column anchored to right; width depends on mode
-    const int info_w_default = 16; // matches "YYYY-MM-DD HH:MM"
+    // Right column anchored to right; width depends only on info mode
+    const int info_w_default = 16; // fits date comfortably
     int info_w = (g_info_col_mode == INFOCOL_HIDDEN) ? 0 : info_w_default;
     int info_col = cols - info_w - 1; if (info_col < name_col + 4) info_col = name_col + 4;
+
+    // Precompute total size for percentage mode (sum of known sizes in view)
+    unsigned long long view_total = 0ULL;
+    if (g_display_mode == DISP_PCT) {
+        for (size_t i = 0; i < dv->n; i++) {
+            if (dv->v[i].size_known) view_total += dv->v[i].size;
+        }
+        if (view_total == 0ULL) view_total = 1ULL; // avoid div-by-zero
+    }
 
     for (int i = 0; i < list_rows; i++) {
         int idx = top + i;
@@ -1135,9 +1157,21 @@ static void draw_list(const DirView *dv, int top) {
             continue;
         }
         const ViewEntry *ve = &dv->v[idx];
-        char sizebuf[64];
-        if (ve->size_known) human_size(ve->size, sizebuf, sizeof(sizebuf));
-        else snprintf(sizebuf, sizeof(sizebuf), "?");
+        // left size/percent column
+        char sizebuf[64] = "";
+        if (sizew > 0) {
+            if (g_display_mode == DISP_PCT) {
+                if (ve->size_known) {
+                    double pct = (double)ve->size * 100.0 / (double)view_total;
+                    if (pct > 999.9) pct = 999.9;
+                    snprintf(sizebuf, sizeof(sizebuf), "%5.1f%%", pct);
+                } else {
+                    snprintf(sizebuf, sizeof(sizebuf), "  --.-%%");
+                }
+            } else { // numeric
+                if (ve->size_known) human_size(ve->size, sizebuf, sizeof(sizebuf)); else snprintf(sizebuf, sizeof(sizebuf), "?");
+            }
+        }
         // right-align size in its column
         int l = (int)strlen(sizebuf);
         int pad = sizew - l; if (pad < 0) pad = 0;
@@ -1146,8 +1180,10 @@ static void draw_list(const DirView *dv, int top) {
         mvaddch(y + i, mark_col, mchar);
         mvaddch(y + i, mark_col + 1, ' ');
         // size column at x=size_col
-        if (pad) { for (int k = 0; k < pad; k++) mvaddch(y + i, size_col + k, ' '); }
-        mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
+        if (sizew > 0) {
+            if (pad) { for (int k = 0; k < pad; k++) mvaddch(y + i, size_col + k, ' '); }
+            mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
+        }
         // type
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
         // space after type
@@ -1158,19 +1194,21 @@ static void draw_list(const DirView *dv, int top) {
         if (name_max < 0) name_max = 0;
         mvaddnstr(y + i, name_col, ve->name, name_max);
         if (ve->is_dir) attroff(COLOR_PAIR(3)); else attroff(COLOR_PAIR(4));
-        // right column content
-        if (g_info_col_mode != INFOCOL_HIDDEN) {
-            char ibuf[64];
+        // right info column content (mtime / owner+perm)
+        if (info_w > 0) {
+            char ibuf[64]; ibuf[0] = '\0';
             if (g_info_col_mode == INFOCOL_MTIME) {
                 struct tm lt; localtime_r(&ve->mtime, &lt);
                 strftime(ibuf, sizeof(ibuf), "%Y-%m-%d %H:%M", &lt);
-            } else {
+            } else if (g_info_col_mode == INFOCOL_OWNER_PERM) {
                 format_owner_perm(ve->abs_path, ibuf, sizeof(ibuf));
             }
-            int il = (int)strlen(ibuf);
-            int ipad = info_w - il; if (ipad < 0) ipad = 0;
-            if (ipad) { for (int k = 0; k < ipad; k++) mvaddch(y + i, info_col + k, ' '); }
-            mvaddnstr(y + i, info_col + ipad, ibuf, info_w - ipad);
+            if (ibuf[0] != '\0') {
+                int il = (int)strlen(ibuf);
+                int ipad = info_w - il; if (ipad < 0) ipad = 0;
+                if (ipad) { for (int k = 0; k < ipad; k++) mvaddch(y + i, info_col + k, ' '); }
+                mvaddnstr(y + i, info_col + ipad, ibuf, info_w - ipad);
+            }
         }
         if (is_sel) attroff(A_REVERSE | A_BOLD);
     }
@@ -1277,12 +1315,14 @@ static void show_help(void) {
         "  t - toggle type filter (all/dirs/files)",
         "  T - toggle filter by query",
         "  SPACE - mark/unmark file/dir",
+"  Ctrl-A - select/deselect all in view",
         "  m - move marked to current directory",
         "  c - copy marked to current directory (with progress)",
         "  d - delete marked (if any) else delete selected",
         "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
-        "  i - alterna colonna info (mtime → proprietario+permessi → nascosta)",
+"  I - size display: numeric → percent → off",
+"  i - info column (mtime → owner+perm → hidden)",
         "  q - quit",
         "  h - this help",
         "",
@@ -1336,7 +1376,7 @@ static void show_help(void) {
 
 static int confirm_delete_prompt(const char *name, int is_dir) {
     char prompt[PATH_MAX + 128];
-    snprintf(prompt, sizeof(prompt), "Eliminare %c '%s'? [y/N] ", is_dir ? 'D' : 'F', name);
+snprintf(prompt, sizeof(prompt), "Delete %c '%s'? [y/N] ", is_dir ? 'D' : 'F', name);
     draw_status(prompt);
     refresh();
     int ch = getch();
@@ -1708,7 +1748,7 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     tq_push(&p.q, rt);
 
     // Progress loop (UI updated from main thread)
-    ScanUI ui = { .enabled = 1, .count = 0, .phase = "Scansione" };
+ScanUI ui = { .enabled = 1, .count = 0, .phase = "Scanning" };
     clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
     struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 50 * 1000 * 1000; // 50ms
     while (wg_value(&p.wg) > 0) {
@@ -1838,7 +1878,7 @@ int main(int argc, char **argv) {
 
     char root[PATH_MAX];
     if (!realpath(root_in, root)) {
-        fprintf(stderr, "Percorso non valido: %s (%s)\n", root_in, strerror(errno));
+fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         return 1;
     }
 
@@ -2026,6 +2066,20 @@ int main(int argc, char **argv) {
                 if (markset_has(&g_marks, ve->abs_path)) markset_remove(&g_marks, ve->abs_path);
                 else markset_add(&g_marks, ve->abs_path);
             }
+        } else if (ch == 1) { // Ctrl-A: toggle select all in current view
+            if (dv.n > 0) {
+                int all_marked = 1;
+                for (size_t i = 0; i < dv.n; i++) {
+                    if (!markset_has(&g_marks, dv.v[i].abs_path)) { all_marked = 0; break; }
+                }
+                if (all_marked) {
+                    for (size_t i = 0; i < dv.n; i++) markset_remove(&g_marks, dv.v[i].abs_path);
+draw_status("Deselected all in view");
+                } else {
+                    for (size_t i = 0; i < dv.n; i++) markset_add(&g_marks, dv.v[i].abs_path);
+draw_status("Selected all in view");
+                }
+            }
         } else if (ch == 'f') {
             char q[256];
             if (prompt_input(q, sizeof(q), "Find: ") > 0) {
@@ -2074,7 +2128,7 @@ int main(int argc, char **argv) {
                         view_free(&dv);
                         build_dir_view(current, root, &cache, &dv);
                         if (dv.n == 0) {
-                            draw_status("No element found in the query regex");
+draw_status("No elements match the regex");
                         } else if (sel_path) {
                             size_t new_idx = 0; int found = 0;
                             for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
@@ -2139,10 +2193,13 @@ int main(int argc, char **argv) {
             } else {
                 g_sort_mode = next_mode;
             }
-        } else if (ch == 'i' || ch == 'I') {
+        } else if (ch == 'i') {
             // cycle info column (mtime -> owner+perm -> hidden -> mtime)
             g_info_col_mode = (g_info_col_mode == INFOCOL_MTIME) ? INFOCOL_OWNER_PERM : (g_info_col_mode == INFOCOL_OWNER_PERM ? INFOCOL_HIDDEN : INFOCOL_MTIME);
             // redraw on next loop
+        } else if (ch == 'I') {
+            // cycle left size column display: numeric -> percentage -> off -> numeric
+            g_display_mode = (g_display_mode == DISP_NUM) ? DISP_PCT : (g_display_mode == DISP_PCT ? DISP_OFF : DISP_NUM);
         } else if (ch == 't') {
             // toggle filter: all -> dirs -> files -> all (lowercase t)
             if (dv.n > 0) {
@@ -2165,7 +2222,7 @@ int main(int argc, char **argv) {
         } else if (ch == 'T') {
             // toggle filter by query
             if (!g_search_query[0]) {
-                draw_status("No query research in memory");
+draw_status("No search query stored");
             } else {
                 int new_state = !g_filter_by_query;
                 if (new_state) {
@@ -2177,7 +2234,7 @@ int main(int argc, char **argv) {
                         // nothing matches: revert
                         g_filter_by_query = 0;
                         build_dir_view(current, root, &cache, &dv);
-                        draw_status("No Elements in the query");
+draw_status("No elements match the query");
                     } else if (sel_path) {
                         size_t new_idx = 0; int found = 0;
                         for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
@@ -2216,7 +2273,7 @@ int main(int argc, char **argv) {
             }
         } else if (ch == 'm') {
             if (g_marks.n == 0) {
-                draw_status("No Element Marked.");
+draw_status("No items marked.");
             } else {
                 // Move marked to current directory, if valid
                 // Validate: destination must be different from each source parent, and not inside the source dir
@@ -2287,7 +2344,7 @@ int main(int argc, char **argv) {
             }
         } else if (ch == 'c') {
             if (g_marks.n == 0) {
-                draw_status("No element Marked.");
+draw_status("No items marked.");
             } else {
                 // Copy marked to current directory with progress
                 size_t n = g_marks.n;
@@ -2345,7 +2402,7 @@ int main(int argc, char **argv) {
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
-                    draw_status("Copy completated.");
+draw_status("Copy completed.");
                 } else {
                     for (size_t i=0;i<n;i++) free(list[i]); free(list);
                 }
@@ -2383,7 +2440,7 @@ int main(int argc, char **argv) {
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
-                    draw_status("Erase completed.");
+draw_status("Delete completed.");
                 } else {
                     for(size_t i=0;i<n;i++) free(list[i]);
                     free(list);
@@ -2425,7 +2482,7 @@ int main(int argc, char **argv) {
                         draw_status("Erase completed.");
                     } else {
                         char msg[PATH_MAX + 64];
-                        snprintf(msg, sizeof(msg), "Error delete of '%s'", ve->name);
+snprintf(msg, sizeof(msg), "Error deleting '%s'", ve->name);
                         draw_status(msg);
                     }
                 }

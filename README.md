@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-Status: 0.25.0
+Status: 0.28.2
 
 Features
 - Parallel scanning: deep work-queue with multiple threads (pthreads)
@@ -40,12 +40,12 @@ Options
 
 TUI keys (highlights)
 - Navigation: Up/Down or j/k; Enter/Right(l) to enter; Backspace/Left to go up; b/e to jump to top/end
-- View: o toggles sort key (size/name/mtime); s toggles order (asc/desc)
+- View: o toggles sort key (size/name/mtime); s toggles order (asc/desc); I toggles left size column (numeric → percent → off)
 - Info: i toggles right info column (mtime → owner+perm → hidden)
 - Filters: t cycles all/dirs/files; T toggles filter-by-query (uses last f/F query)
 - Search: f substring prompt (case-insensitive), F regex prompt (case-insensitive), n/N next/previous match (wraps around)
 - Rescan: r rescan selected dir, R rescan current dir (parallel)
-- Marks/ops: Space mark/unmark; m move marked; c copy marked; d delete marked (if any) else selected
+- Marks/ops: Space mark/unmark; Ctrl-A select/deselect all; m move marked; c copy marked; d delete marked (if any) else selected
   - After successful copy/move, marked items are cleared automatically
   - During copy/move conflicts: o overwrite, r rename (with suffix), s skip; or O/R/S to apply to all
 - Help/quit: h help, q quit
