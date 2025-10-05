@@ -65,7 +65,7 @@
 #endif
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.26.6"
+#define FASTDU_VERSION "0.26.7"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -403,8 +403,16 @@ static int cache_save(const char *root, const Cache *c) {
     if (!cache_path) return -1;
     FILE *f = fopen(cache_path, "w");
     if (!f) { free(cache_path); return -1; }
-    fprintf(f, "# fastdu-cache v2\n");
+    fprintf(f, "# fastdu-cache v3\n");
     fprintf(f, "root\t%s\n", root);
+    // totals: write root total bytes if available
+    unsigned long long total_bytes = 0ULL;
+    pthread_mutex_lock((pthread_mutex_t*)&c->mu);
+    for (size_t i = 0; i < c->n; i++) {
+        if (c->v[i].abs_path && strcmp(c->v[i].abs_path, root) == 0) { total_bytes = c->v[i].size; break; }
+    }
+    pthread_mutex_unlock((pthread_mutex_t*)&c->mu);
+    fprintf(f, "totals\t%llu\n", (unsigned long long)total_bytes);
     pthread_mutex_lock((pthread_mutex_t*)&c->mu);
     for (size_t i = 0; i < c->n; i++) {
         char *enc = pct_encode(c->v[i].rel_path ? c->v[i].rel_path : ".");
@@ -438,15 +446,23 @@ static int cache_load(const char *root, Cache *c) {
 
     char *line = NULL; size_t len = 0; ssize_t r;
     int header_ok = 0; int version = 1;
+    unsigned long long totals_bytes = 0ULL;
     while ((r = getline(&line, &len, f)) != -1) {
         if (r > 0 && (line[r-1] == '\n' || line[r-1] == '\r')) line[--r] = '\0';
         if (!header_ok) {
-            if (strncmp(line, "# fastdu-cache v2", 18) == 0) { header_ok = 1; version = 2; }
+            if (strncmp(line, "# fastdu-cache v3", 18) == 0) { header_ok = 1; version = 3; }
+            else if (strncmp(line, "# fastdu-cache v2", 18) == 0) { header_ok = 1; version = 2; }
             else if (strncmp(line, "# fastdu-cache v1", 18) == 0) { header_ok = 1; version = 1; }
             continue;
         }
         if (strncmp(line, "root\t", 5) == 0) {
             // informational, ignore value
+            continue;
+        }
+        if (version >= 3 && strncmp(line, "totals\t", 8) == 0) {
+            const char *b = line + 8;
+            unsigned long long v = 0ULL; sscanf(b, "%llu", &v);
+            totals_bytes = v;
             continue;
         }
         if (line[0] == 'D' && line[1] == '\t') {
@@ -482,6 +498,7 @@ static int cache_load(const char *root, Cache *c) {
     }
     free(line);
     fclose(f);
+    // runtime totals will be set by caller based on cache content
     return 1; // loaded
 }
 
@@ -1159,6 +1176,10 @@ static void draw_list(const DirView *dv, int top) {
     }
 }
 
+/* Forward declarations for cache ancestor adjustment helpers used below */
+static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
+static void cache_add_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, unsigned long long delta);
+
 /*
  * maybe_rescan_hovered
  * --------------------
@@ -1187,9 +1208,19 @@ static void maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
     struct stat st;
     if (lstat(ve->abs_path, &st) != 0) return;
     if (!ce || st.st_mtime != ce->dir_mtime) {
+        // compute old size
+        unsigned long long old_sz = ce ? ce->size : 0ULL;
         char *cache_abs = path_join(root, CACHE_FILENAME);
         unsigned long long sz = scan_dir_recursive(ve->abs_path, root, cache_abs, cache, NULL);
         (void)sz;
+        // compute delta and adjust ancestors + footer total
+        CacheEntry *ce_new = cache_get(cache, ve->abs_path);
+        unsigned long long new_sz = ce_new ? ce_new->size : 0ULL;
+        long long delta = (long long)new_sz - (long long)old_sz;
+        if (delta > 0) cache_add_ancestors_after_delta(cache, root, ve->abs_path, (unsigned long long)delta);
+        else if (delta < 0) cache_adjust_ancestors_after_delta(cache, root, ve->abs_path, (long long)(-delta));
+        if (delta >= 0) g_last_bytes += (unsigned long long)delta;
+        else { unsigned long long dec = (unsigned long long)(-delta); if (g_last_bytes > dec) g_last_bytes -= dec; else g_last_bytes = 0ULL; }
         cache_save(root, cache);
         free(cache_abs);
         ce = cache_get(cache, ve->abs_path);
@@ -1851,6 +1882,10 @@ int main(int argc, char **argv) {
         int cols, rows; getmaxyx(stdscr, rows, cols);
         mvhline(rows-1, 0, ' ', cols);
         refresh();
+    } else {
+        // Cache loaded: set footer totals from cache root entry (v2/v3)
+        CacheEntry *root_ce = cache_get(&cache, root);
+        if (root_ce) g_last_bytes = root_ce->size; else g_last_bytes = 0ULL;
     }
 
     DirView dv = (DirView){0};
@@ -1943,6 +1978,9 @@ int main(int argc, char **argv) {
                 ViewEntry *ve = &dv.v[dv.selected];
                 char *sel_path = xstrdup(ve->abs_path);
                 if (ve->is_dir) {
+                    // compute old size and preserve current global total
+                    unsigned long long old_sz = 0ULL; CacheEntry *ce_old = cache_get(&cache, ve->abs_path); if (ce_old) old_sz = ce_old->size;
+                    unsigned long long prev_total = g_last_bytes;
                     // duplicate scan path to avoid relying on dv memory
                     char *scan_path = xstrdup(ve->abs_path);
                     if (scan_path) {
@@ -1951,32 +1989,35 @@ int main(int argc, char **argv) {
                         if (threads > 64) threads = 64;
                         (void)scan_dir_parallel_deep(scan_path, cache_abs, &cache, threads);
                         free(scan_path);
+                        // compute delta and adjust ancestors
+                        unsigned long long new_sz = 0ULL; CacheEntry *ce_new = cache_get(&cache, ve->abs_path); if (ce_new) new_sz = ce_new->size;
+                        long long delta = (long long)new_sz - (long long)old_sz;
+                        if (delta > 0) cache_add_ancestors_after_delta(&cache, root, ve->abs_path, (unsigned long long)delta);
+                        else if (delta < 0) cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
+                        // restore footer total by applying delta to previous total (partial scan overwrote it)
+                        if (delta >= 0) g_last_bytes = prev_total + (unsigned long long)delta;
+                        else { unsigned long long dec = (unsigned long long)(-delta); g_last_bytes = (prev_total > dec) ? (prev_total - dec) : 0ULL; }
                         cache_save(root, &cache);
                     }
-                    // rebuild and reselect same path
-                    size_t old_selected = dv.selected;
-                    view_free(&dv);
-                    build_dir_view(current, root, &cache, &dv);
-                    // find index of sel_path
-                    size_t new_idx = 0; int found = 0;
-                    if (sel_path) {
-                        for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
-                    }
-                    if (found) dv.selected = new_idx; else dv.selected = (old_selected < dv.n ? old_selected : (dv.n ? dv.n-1 : 0));
-                    // ensure visibility
-                    int rows, cols; getmaxyx(stdscr, rows, cols);
-                    int list_rows = rows - 3;
-                    if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
-                    if ((int)dv.selected < top) top = (int)dv.selected;
                 }
+                // rebuild and reselect same path
+                size_t old_selected = dv.selected;
+                view_free(&dv);
+                build_dir_view(current, root, &cache, &dv);
+                // find index of sel_path
+                size_t new_idx = 0; int found = 0;
+                if (sel_path) {
+                    for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
+                }
+                if (found) dv.selected = new_idx; else dv.selected = (old_selected < dv.n ? old_selected : (dv.n ? dv.n-1 : 0));
+                // ensure visibility
+                int rows, cols; getmaxyx(stdscr, rows, cols);
+                int list_rows = rows - 3;
+                if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                if ((int)dv.selected < top) top = (int)dv.selected;
                 if (sel_path) free(sel_path);
             }
         } else if (ch == 'R') {
-            int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
-            if (threads < 1) threads = 1;
-            if (threads > 64) threads = 64;
-            (void)scan_dir_parallel_deep(current, cache_abs, &cache, threads);
-            cache_save(root, &cache);
             view_free(&dv);
             build_dir_view(current, root, &cache, &dv);
         } else if (ch == ' ') {
@@ -1987,7 +2028,7 @@ int main(int argc, char **argv) {
             }
         } else if (ch == 'f') {
             char q[256];
-            if (prompt_input(q, sizeof(q), "Trova: ") > 0) {
+            if (prompt_input(q, sizeof(q), "Find: ") > 0) {
                 strncpy(g_search_query, q, sizeof(g_search_query)); g_search_query[sizeof(g_search_query)-1]='\0';
                 if (dv.n > 0) {
                     size_t start = (dv.selected < dv.n) ? dv.selected : 0;
@@ -2004,7 +2045,7 @@ int main(int argc, char **argv) {
                         if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                         if ((int)dv.selected < top) top = (int)dv.selected;
                     } else {
-                        draw_status("Nessuna corrispondenza");
+                        draw_status("Nothing Found");
                     }
                 }
             }
@@ -2022,7 +2063,7 @@ int main(int argc, char **argv) {
                     if (rc != 0) {
                         char errbuf[256];
                         regerror(rc, &re, errbuf, sizeof(errbuf));
-                        draw_status("Regex non valida");
+                        draw_status("Regex invalid");
                     } else {
                         if (g_regex_enabled) regfree(&g_regex);
                         g_regex = re;
@@ -2033,7 +2074,7 @@ int main(int argc, char **argv) {
                         view_free(&dv);
                         build_dir_view(current, root, &cache, &dv);
                         if (dv.n == 0) {
-                            draw_status("Nessun elemento corrisponde alla regex");
+                            draw_status("No element found in the query regex");
                         } else if (sel_path) {
                             size_t new_idx = 0; int found = 0;
                             for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
@@ -2062,7 +2103,7 @@ int main(int argc, char **argv) {
                     if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                     if ((int)dv.selected < top) top = (int)dv.selected;
                 } else {
-                    draw_status("Nessuna corrispondenza");
+                    draw_status("Nothing Found");
                 }
             }
         } else if (ch == 'N') {
@@ -2080,7 +2121,7 @@ int main(int argc, char **argv) {
                     if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                     if ((int)dv.selected < top) top = (int)dv.selected;
                 } else {
-                    draw_status("Nessuna corrispondenza");
+                    draw_status("Nothing Found");
                 }
             }
         } else if (ch == 'o' || ch == 'O') {
@@ -2124,7 +2165,7 @@ int main(int argc, char **argv) {
         } else if (ch == 'T') {
             // toggle filter by query
             if (!g_search_query[0]) {
-                draw_status("Nessuna query di ricerca memorizzata");
+                draw_status("No query research in memory");
             } else {
                 int new_state = !g_filter_by_query;
                 if (new_state) {
@@ -2136,7 +2177,7 @@ int main(int argc, char **argv) {
                         // nothing matches: revert
                         g_filter_by_query = 0;
                         build_dir_view(current, root, &cache, &dv);
-                        draw_status("Nessun elemento corrisponde alla query");
+                        draw_status("No Elements in the query");
                     } else if (sel_path) {
                         size_t new_idx = 0; int found = 0;
                         for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
@@ -2175,7 +2216,7 @@ int main(int argc, char **argv) {
             }
         } else if (ch == 'm') {
             if (g_marks.n == 0) {
-                draw_status("Nessun elemento marcato.");
+                draw_status("No Element Marked.");
             } else {
                 // Move marked to current directory, if valid
                 // Validate: destination must be different from each source parent, and not inside the source dir
@@ -2183,7 +2224,7 @@ int main(int argc, char **argv) {
                 char **list = malloc(n * sizeof(char*));
                 for (size_t i=0;i<n;i++) list[i] = xstrdup(g_marks.paths[i]);
                 // Confirm move
-                char prompt[PATH_MAX+128]; snprintf(prompt, sizeof(prompt), "Spostare %zu elementi in '%s'? [y/N] ", n, current);
+                char prompt[PATH_MAX+128]; snprintf(prompt, sizeof(prompt), "Move %zu elements in '%s'? [y/N] ", n, current);
                 draw_status(prompt); refresh(); int chc=getch();
                 if (chc=='y'||chc=='Y'){
                     char conflict_all_m = 0; char conflict_action_all_m = 0; // 'o','r','s'
@@ -2239,14 +2280,14 @@ int main(int argc, char **argv) {
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
-                    draw_status("Spostamento completato.");
+                    draw_status("Move completed.");
                 } else {
                     for(size_t i=0;i<n;i++) free(list[i]); free(list);
                 }
             }
         } else if (ch == 'c') {
             if (g_marks.n == 0) {
-                draw_status("Nessun elemento marcato.");
+                draw_status("No element Marked.");
             } else {
                 // Copy marked to current directory with progress
                 size_t n = g_marks.n;
@@ -2257,7 +2298,7 @@ int main(int argc, char **argv) {
                 for (size_t i=0;i<n;i++) total += sum_path_size(list[i]);
                 char prompt[PATH_MAX+128];
                 char totbuf[64]; human_size(total, totbuf, sizeof(totbuf));
-                snprintf(prompt, sizeof(prompt), "Copiare %zu elementi in '%s' (tot %s)? [y/N] ", n, current, totbuf);
+                snprintf(prompt, sizeof(prompt), "Copy %zu elements in '%s' (tot %s)? [y/N] ", n, current, totbuf);
                 draw_status(prompt); refresh(); int chc=getch();
                 if (chc=='y' || chc=='Y') {
                     CopyUI ui = { .enabled = 1, .total = total, .done = 0, .phase = "Copy" };
@@ -2304,7 +2345,7 @@ int main(int argc, char **argv) {
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
-                    draw_status("Copia completata.");
+                    draw_status("Copy completated.");
                 } else {
                     for (size_t i=0;i<n;i++) free(list[i]); free(list);
                 }
@@ -2324,7 +2365,7 @@ int main(int argc, char **argv) {
                 }
                 // Confirm
                 size_t cnt_dir=0,cnt_file=0; for(size_t i=0;i<n;i++){ struct stat st; if (lstat(list[i],&st)==0){ if(S_ISDIR(st.st_mode)) cnt_dir++; else cnt_file++; }}
-                char prompt[256]; snprintf(prompt,sizeof(prompt),"Eliminare %zu elementi (%zu dir, %zu file)? [y/N] ", n, cnt_dir, cnt_file);
+                char prompt[256]; snprintf(prompt,sizeof(prompt),"Delete %zu elements (%zu dir, %zu file)? [y/N] ", n, cnt_dir, cnt_file);
                 draw_status(prompt); refresh(); int chc=getch();
                 if (chc=='y'||chc=='Y'){
                     for (size_t i=0;i<n;i++){
@@ -2342,7 +2383,7 @@ int main(int argc, char **argv) {
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
-                    draw_status("Eliminazione completata.");
+                    draw_status("Erase completed.");
                 } else {
                     for(size_t i=0;i<n;i++) free(list[i]);
                     free(list);
@@ -2381,10 +2422,10 @@ int main(int argc, char **argv) {
                         view_free(&dv);
                         build_dir_view(current, root, &cache, &dv);
                         if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
-                        draw_status("Eliminazione completata.");
+                        draw_status("Erase completed.");
                     } else {
                         char msg[PATH_MAX + 64];
-                        snprintf(msg, sizeof(msg), "Errore eliminazione di '%s'", ve->name);
+                        snprintf(msg, sizeof(msg), "Error delete of '%s'", ve->name);
                         draw_status(msg);
                     }
                 }
