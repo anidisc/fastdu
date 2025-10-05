@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.29.4"
+#define FASTDU_VERSION "0.30"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -800,14 +800,43 @@ typedef struct {
     size_t cap;
 } MarkSet;
 
+// Forward declaration needed for markset normalization helpers
+static int path_is_parent_of(const char *parent, const char *child);
+
+// Async marked-files calculator state
+static atomic_int g_mf_inflight = 0;               // 1 when a background count is running
+static atomic_ullong g_marked_files_value = 0ULL;  // last computed value (eventually consistent)
+
+static void schedule_marked_files_recalc(void);
+
 static void markset_init(MarkSet *m) { m->paths = NULL; m->n = m->cap = 0; }
 static void markset_free(MarkSet *m) { for (size_t i=0;i<m->n;i++) free(m->paths[i]); free(m->paths); m->paths=NULL; m->n=m->cap=0; }
-static void markset_clear(MarkSet *m) { for (size_t i=0;i<m->n;i++) free(m->paths[i]); m->n=0; }
+static void markset_clear(MarkSet *m) { for (size_t i=0;i<m->n;i++) free(m->paths[i]); m->n=0; schedule_marked_files_recalc(); }
 static int markset_index_of(MarkSet *m, const char *p) { for (size_t i=0;i<m->n;i++) if (strcmp(m->paths[i], p)==0) return (int)i; return -1; }
 static int markset_has(MarkSet *m, const char *p) { return markset_index_of(m,p) >= 0; }
-static void markset_add(MarkSet *m, const char *p) { if (markset_has(m,p)) return; if (m->n==m->cap){ size_t nc=m->cap?m->cap*2:64; void*nv=realloc(m->paths,nc*sizeof(char*)); if(!nv) return; m->paths=(char**)nv; m->cap=nc;} m->paths[m->n++]=xstrdup(p);} 
-static void markset_remove(MarkSet *m, const char *p) { int i=markset_index_of(m,p); if(i<0) return; free(m->paths[i]); if((size_t)i<m->n-1) memmove(&m->paths[i], &m->paths[i+1], (m->n-i-1)*sizeof(char*)); m->n--; }
-static void markset_remove_prefix(MarkSet *m, const char *prefix) { size_t w=0; size_t lp=strlen(prefix); for(size_t i=0;i<m->n;i++){ if (strncmp(m->paths[i], prefix, lp)==0) { free(m->paths[i]); continue; } if (w!=i) m->paths[w]=m->paths[i]; w++; } m->n=w; }
+static int markset_covers(MarkSet *m, const char *p) { for (size_t i=0;i<m->n;i++) { if (path_is_parent_of(m->paths[i], p)) return 1; } return 0; }
+static void markset_add(MarkSet *m, const char *p) {
+    // If already present, nothing to do
+    if (markset_has(m, p)) return;
+    // If any existing mark is a parent of p, do not add p (avoid redundant subpath)
+    for (size_t i = 0; i < m->n; i++) {
+        if (path_is_parent_of(m->paths[i], p)) return;
+    }
+    // Remove any existing marks that are subpaths of p
+    size_t w = 0; size_t lp = strlen(p);
+    for (size_t i = 0; i < m->n; i++) {
+        if (path_is_parent_of(p, m->paths[i])) { free(m->paths[i]); continue; }
+        if (w != i) m->paths[w] = m->paths[i];
+        w++;
+    }
+    m->n = w;
+    // Append p
+    if (m->n == m->cap) { size_t nc = m->cap ? m->cap * 2 : 64; void *nv = realloc(m->paths, nc * sizeof(char*)); if (!nv) return; m->paths = (char**)nv; m->cap = nc; }
+    m->paths[m->n++] = xstrdup(p);
+    schedule_marked_files_recalc();
+}
+static void markset_remove(MarkSet *m, const char *p) { int i=markset_index_of(m,p); if(i<0) return; free(m->paths[i]); if((size_t)i<m->n-1) memmove(&m->paths[i], &m->paths[i+1], (m->n-i-1)*sizeof(char*)); m->n--; schedule_marked_files_recalc(); }
+static void markset_remove_prefix(MarkSet *m, const char *prefix) { size_t w=0; size_t lp=strlen(prefix); for(size_t i=0;i<m->n;i++){ if (strncmp(m->paths[i], prefix, lp)==0) { free(m->paths[i]); continue; } if (w!=i) m->paths[w]=m->paths[i]; w++; } m->n=w; schedule_marked_files_recalc(); }
 
 static void view_free(DirView *dv) {
     for (size_t i = 0; i < dv->n; i++) {
@@ -1164,28 +1193,22 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     char totalbuf[64];
     human_size((unsigned long long)g_last_bytes, totalbuf, sizeof(totalbuf));
     char markedbuf[64] = "";
-    unsigned long long marked_files = 0ULL;
+    unsigned long long marked_files_cached = atomic_load(&g_marked_files_value);
     if (g_marks.n > 0) {
         unsigned long long mt = compute_marked_total_bytes(cache);
         human_size(mt, markedbuf, sizeof(markedbuf));
-        // compute marked file count
-        for (size_t i = 0; i < g_marks.n; i++) {
-            const char *p = g_marks.paths[i];
-            if (is_subpath_of_any_marked(p)) continue;
-            marked_files += count_files_path(p);
-        }
     }
     char footer[512];
     if (g_search_query[0]) {
         char qbuf[128];
         snprintf(qbuf, sizeof(qbuf), " | query:%s", g_search_query);
         if (g_marks.n > 0)
-            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s, %llu files)%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, (unsigned long long)marked_files, qbuf);
+            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s, %llu files)%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, (unsigned long long)marked_files_cached, qbuf);
         else
             snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, qbuf);
     } else {
         if (g_marks.n > 0)
-            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s, %llu files) ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, (unsigned long long)marked_files);
+            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s, %llu files) ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, (unsigned long long)marked_files_cached);
         else
             snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu ", (unsigned long long)g_last_files, totalbuf, g_marks.n);
     }
@@ -1287,8 +1310,10 @@ static void draw_list(const DirView *dv, int top) {
         // right-align size in its column
         int l = (int)strlen(sizebuf);
         int pad = sizew - l; if (pad < 0) pad = 0;
-        // mark column
-        char mchar = markset_has(&g_marks, ve->abs_path) ? '*' : ' ';
+        // mark column: show '*' if explicitly marked, '+' if inherits from a parent
+        char mchar = ' ';
+        if (markset_has(&g_marks, ve->abs_path)) mchar = '*';
+        else if (markset_covers(&g_marks, ve->abs_path)) mchar = '+';
         mvaddch(y + i, mark_col, mchar);
         mvaddch(y + i, mark_col + 1, ' ');
         // size column at x=size_col
@@ -1401,33 +1426,75 @@ static int prompt_input(char *buf, size_t bufsz, const char *label) {
     return (int)n;
 }
 
+// Background worker to compute marked files count
+typedef struct MFJob {
+    char **paths;
+    size_t n;
+} MFJob;
+
+static void *mf_worker(void *arg) {
+    MFJob *job = (MFJob*)arg;
+    unsigned long long total = 0ULL;
+    for (size_t i = 0; i < job->n; i++) {
+        total += count_files_path(job->paths[i]);
+    }
+    for (size_t i = 0; i < job->n; i++) free(job->paths[i]);
+    free(job->paths);
+    free(job);
+    atomic_store(&g_marked_files_value, total);
+    atomic_store(&g_mf_inflight, 0);
+    return NULL;
+}
+
+static void schedule_marked_files_recalc(void) {
+    if (atomic_exchange(&g_mf_inflight, 1) == 1) return; // already running
+    // snapshot current explicit marks
+    if (g_marks.n == 0) { atomic_store(&g_marked_files_value, 0ULL); atomic_store(&g_mf_inflight, 0); return; }
+    MFJob *job = (MFJob*)malloc(sizeof(MFJob)); if (!job) { atomic_store(&g_mf_inflight, 0); return; }
+    job->n = g_marks.n;
+    job->paths = (char**)malloc(job->n * sizeof(char*)); if (!job->paths) { free(job); atomic_store(&g_mf_inflight, 0); return; }
+    for (size_t i = 0; i < job->n; i++) job->paths[i] = xstrdup(g_marks.paths[i]);
+    pthread_t th;
+    if (pthread_create(&th, NULL, mf_worker, job) == 0) {
+        pthread_detach(th);
+    } else {
+        for (size_t i = 0; i < job->n; i++) free(job->paths[i]); free(job->paths); free(job);
+        atomic_store(&g_mf_inflight, 0);
+    }
+}
+
+static int path_is_parent_of(const char *parent, const char *child) {
+    size_t lp = strlen(parent);
+    if (lp == 0) return 0;
+    if (strcmp(parent, child) == 0) return 1; // treat equal as parent for normalization
+    if (strncmp(child, parent, lp) != 0) return 0;
+    if (child[lp] == '\0') return 1; // exact match
+    return child[lp] == '/';
+}
+
 static int is_subpath_of_any_marked(const char *p) {
-    size_t lp = strlen(p);
+    // After normalization in markset_add, this should rarely be true, but keep for safety
     for (size_t i = 0; i < g_marks.n; i++) {
-        const char *m = g_marks.paths[i];
-        size_t lm = strlen(m);
-        if (lm == 0) continue;
-        if (strcmp(m, p) == 0) return 0; // equal path not considered subpath
-        if (lp > lm && strncmp(p, m, lm) == 0 && p[lm] == '/') return 1;
+        if (path_is_parent_of(g_marks.paths[i], p) && strcmp(g_marks.paths[i], p) != 0) return 1;
     }
     return 0;
 }
 
 static unsigned long long compute_marked_total_bytes(Cache *cache) {
+    // Fast path: do not traverse the filesystem here; use cache only to keep UI responsive.
+    // Unknown dirs (not in cache yet) are treated as 0 to avoid blocking.
     unsigned long long total = 0ULL;
     for (size_t i = 0; i < g_marks.n; i++) {
         const char *path = g_marks.paths[i];
-        // If this path is inside another marked directory, skip to avoid double counting
         if (is_subpath_of_any_marked(path)) continue;
         struct stat st;
         if (lstat(path, &st) != 0) continue;
         if (S_ISREG(st.st_mode)) {
             total += (unsigned long long)st.st_size;
         } else if (S_ISDIR(st.st_mode)) {
-            unsigned long long sz = 0ULL;
             CacheEntry *ce = cache_get(cache, path);
-            if (ce) sz = ce->size; else sz = sum_path_size(path);
-            total += sz;
+            if (ce) total += ce->size;
+            // else skip (0) to avoid heavy sum_path_size traversal in render loop
         }
     }
     return total;
@@ -2295,8 +2362,15 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         } else if (ch == ' ') {
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
-                if (markset_has(&g_marks, ve->abs_path)) markset_remove(&g_marks, ve->abs_path);
-                else markset_add(&g_marks, ve->abs_path);
+                // If this path is covered by a marked ancestor (and not explicitly marked), do not allow deselection
+                int explicit_mark = markset_has(&g_marks, ve->abs_path);
+                int covered = markset_covers(&g_marks, ve->abs_path);
+                if (!explicit_mark && covered) {
+                    draw_status("Item inherits mark from a parent; cannot toggle.");
+                } else {
+                    if (explicit_mark) markset_remove(&g_marks, ve->abs_path);
+                    else markset_add(&g_marks, ve->abs_path);
+                }
             }
         } else if (ch == 1) { // Ctrl-A: toggle select all in current view
             if (dv.n > 0) {
