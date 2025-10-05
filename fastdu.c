@@ -304,6 +304,9 @@ static char *abspath_from_rel(const char *root, const char *rel) {
 // ------------------------------
 // Cache
 // ------------------------------
+// Forward declaration for global files counter used in cache I/O
+static unsigned long long g_last_files;
+
 /*
  * The in-memory cache maps absolute directories to: total size, inode and
  * mtime. It is serialized to a text file under the scan root (CACHE_FILENAME)
@@ -405,7 +408,7 @@ static int cache_save(const char *root, const Cache *c) {
     if (!f) { free(cache_path); return -1; }
     fprintf(f, "# fastdu-cache v3\n");
     fprintf(f, "root\t%s\n", root);
-    // totals: write root total bytes if available
+    // totals: write root total bytes and global files if available
     unsigned long long total_bytes = 0ULL;
     pthread_mutex_lock((pthread_mutex_t*)&c->mu);
     for (size_t i = 0; i < c->n; i++) {
@@ -413,6 +416,7 @@ static int cache_save(const char *root, const Cache *c) {
     }
     pthread_mutex_unlock((pthread_mutex_t*)&c->mu);
     fprintf(f, "totals\t%llu\n", (unsigned long long)total_bytes);
+    fprintf(f, "totals_files\t%llu\n", (unsigned long long)g_last_files);
     pthread_mutex_lock((pthread_mutex_t*)&c->mu);
     for (size_t i = 0; i < c->n; i++) {
         char *enc = pct_encode(c->v[i].rel_path ? c->v[i].rel_path : ".");
@@ -447,6 +451,7 @@ static int cache_load(const char *root, Cache *c) {
     char *line = NULL; size_t len = 0; ssize_t r;
     int header_ok = 0; int version = 1;
     unsigned long long totals_bytes = 0ULL;
+    unsigned long long totals_files = 0ULL;
     while ((r = getline(&line, &len, f)) != -1) {
         if (r > 0 && (line[r-1] == '\n' || line[r-1] == '\r')) line[--r] = '\0';
         if (!header_ok) {
@@ -463,6 +468,12 @@ static int cache_load(const char *root, Cache *c) {
             const char *b = line + 8;
             unsigned long long v = 0ULL; sscanf(b, "%llu", &v);
             totals_bytes = v;
+            continue;
+        }
+        if (version >= 3 && strncmp(line, "totals_files\t", 14) == 0) {
+            const char *b = line + 14;
+            unsigned long long v = 0ULL; sscanf(b, "%llu", &v);
+            totals_files = v;
             continue;
         }
         if (line[0] == 'D' && line[1] == '\t') {
@@ -498,7 +509,8 @@ static int cache_load(const char *root, Cache *c) {
     }
     free(line);
     fclose(f);
-    // runtime totals will be set by caller based on cache content
+    // set runtime totals from cache if present
+    if (totals_files > 0ULL) g_last_files = totals_files;
     return 1; // loaded
 }
 
@@ -925,12 +937,43 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
     }
     closedir(dp);
     qsort(out->v, out->n, sizeof(ViewEntry), cmp_entries);
-    // Update footer files counter to reflect current directory view size
-    g_last_files = (unsigned long long)out->n;
     return 0;
 }
 
 // Utility: sum sizes for copy estimation (fd-based)
+// Count files recursively (regular files only) using fd-based traversal
+static unsigned long long count_dir_files_fd(int dirfd) {
+    unsigned long long count = 0ULL;
+    int dupfd = dup(dirfd);
+    if (dupfd < 0) return 0ULL;
+    DIR *dp = fdopendir(dupfd);
+    if (!dp) { close(dupfd); return 0ULL; }
+    struct dirent *de;
+    while ((de = readdir(dp)) != NULL) {
+        if (is_dot_or_dotdot(de->d_name)) continue;
+        if (strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
+        unsigned char dt = de->d_type;
+        if (dt == DT_LNK) continue;
+        if (dt == DT_REG) {
+            count++;
+        } else if (dt == DT_UNKNOWN) {
+            struct stat st0;
+            if (fstatat(dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) == 0) {
+                if (S_ISREG(st0.st_mode)) count++;
+                else if (S_ISDIR(st0.st_mode)) {
+                    int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                    if (cfd >= 0) { count += count_dir_files_fd(cfd); close(cfd); }
+                }
+            }
+        } else if (dt == DT_DIR) {
+            int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (cfd >= 0) { count += count_dir_files_fd(cfd); close(cfd); }
+        }
+    }
+    closedir(dp);
+    return count;
+}
+
 static unsigned long long sum_dir_sizes_fd(int dirfd) {
     unsigned long long total = 0ULL;
     int dupfd = dup(dirfd);
@@ -974,6 +1017,20 @@ static unsigned long long sum_path_size(const char *path) {
         unsigned long long s = sum_dir_sizes_fd(fd);
         close(fd);
         return s;
+    }
+    return 0ULL;
+}
+
+static unsigned long long count_files_path(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return 0ULL;
+    if (S_ISREG(st.st_mode)) return 1ULL;
+    if (S_ISDIR(st.st_mode)) {
+        int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (fd < 0) return 0ULL;
+        unsigned long long c = count_dir_files_fd(fd);
+        close(fd);
+        return c;
     }
     return 0ULL;
 }
@@ -1051,6 +1108,7 @@ static int copy_tree_with_progress(const char *src, const char *dst, CopyUI *ui,
 static MarkSet g_marks; // global marks set for UI
 // Forward decl for marked total
 static unsigned long long compute_marked_total_bytes(Cache *cache);
+static int is_subpath_of_any_marked(const char *p);
 
 static void draw_header(const char *root, const char *cur, Cache *cache) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
@@ -1075,21 +1133,28 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     char totalbuf[64];
     human_size((unsigned long long)g_last_bytes, totalbuf, sizeof(totalbuf));
     char markedbuf[64] = "";
+    unsigned long long marked_files = 0ULL;
     if (g_marks.n > 0) {
         unsigned long long mt = compute_marked_total_bytes(cache);
         human_size(mt, markedbuf, sizeof(markedbuf));
+        // compute marked file count
+        for (size_t i = 0; i < g_marks.n; i++) {
+            const char *p = g_marks.paths[i];
+            if (is_subpath_of_any_marked(p)) continue;
+            marked_files += count_files_path(p);
+        }
     }
     char footer[512];
     if (g_search_query[0]) {
         char qbuf[128];
         snprintf(qbuf, sizeof(qbuf), " | query:%s", g_search_query);
         if (g_marks.n > 0)
-            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s)%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, qbuf);
+            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s, %llu files)%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, (unsigned long long)marked_files, qbuf);
         else
             snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, qbuf);
     } else {
         if (g_marks.n > 0)
-            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s) ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf);
+            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s, %llu files) ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, (unsigned long long)marked_files);
         else
             snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu ", (unsigned long long)g_last_files, totalbuf, g_marks.n);
     }
@@ -2475,11 +2540,12 @@ draw_status("Copy completed.");
                 if (chc=='y'||chc=='Y'){
                     for (size_t i=0;i<n;i++){
                         const char *p = list[i];
-                        // compute delta
+                        // compute delta bytes and files
                         unsigned long long delta=0ULL; struct stat st; int is_dir=0;
                         if (lstat(p,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; CacheEntry*ce=cache_get(&cache,p); if(ce) delta=ce->size; else delta=scan_dir_recursive(p, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
+                        unsigned long long files_dec = count_files_path(p);
                         // delete
-                        if (remove_tree(p, cache_abs)==0){ if (is_dir) cache_remove_prefix(&cache,p); cache_adjust_ancestors_after_delta(&cache, root, p, (long long)delta); }
+                        if (remove_tree(p, cache_abs)==0){ if (is_dir) cache_remove_prefix(&cache,p); cache_adjust_ancestors_after_delta(&cache, root, p, (long long)delta); if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL; }
                     }
                     cache_save(root,&cache);
                     // clear marks that were deleted
@@ -2520,6 +2586,9 @@ draw_status("Delete completed.");
                     if (rc == 0) {
                         if (is_dir) cache_remove_prefix(&cache, ve->abs_path);
                         cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)delta);
+                        // decrement global files by files under removed path
+                        unsigned long long files_dec = count_files_path(ve->abs_path);
+                        if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL;
                         cache_save(root, &cache);
                         // unmark removed path and any subpaths
                         markset_remove_prefix(&g_marks, ve->abs_path);
