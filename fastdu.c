@@ -1047,7 +1047,10 @@ static int copy_tree_with_progress(const char *src, const char *dst, CopyUI *ui,
 // TUI
 // ------------------------------
 static MarkSet g_marks; // global marks set for UI
-static void draw_header(const char *root, const char *cur) {
+// Forward decl for marked total
+static unsigned long long compute_marked_total_bytes(Cache *cache);
+
+static void draw_header(const char *root, const char *cur, Cache *cache) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
     attron(COLOR_PAIR(1));
     mvhline(0, 0, ' ', cols);
@@ -1069,13 +1072,24 @@ static void draw_header(const char *root, const char *cur) {
     mvhline(rows-2, 0, ' ', cols);
     char totalbuf[64];
     human_size((unsigned long long)g_last_bytes, totalbuf, sizeof(totalbuf));
-    char footer[256];
+    char markedbuf[64] = "";
+    if (g_marks.n > 0) {
+        unsigned long long mt = compute_marked_total_bytes(cache);
+        human_size(mt, markedbuf, sizeof(markedbuf));
+    }
+    char footer[512];
     if (g_search_query[0]) {
         char qbuf[128];
         snprintf(qbuf, sizeof(qbuf), " | query:%s", g_search_query);
-        snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, qbuf);
+        if (g_marks.n > 0)
+            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s)%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, qbuf);
+        else
+            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, qbuf);
     } else {
-        snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu ", (unsigned long long)g_last_files, totalbuf, g_marks.n);
+        if (g_marks.n > 0)
+            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s) ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf);
+        else
+            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu ", (unsigned long long)g_last_files, totalbuf, g_marks.n);
     }
     mvaddnstr(rows-2, 0, footer, cols-1);
     attroff(COLOR_PAIR(1));
@@ -1287,6 +1301,38 @@ static int prompt_input(char *buf, size_t bufsz, const char *label) {
     size_t n = strlen(buf);
     while (n > 0 && (buf[n-1] == ' ' || buf[n-1] == '\t' || buf[n-1] == '\r')) { buf[--n] = '\0'; }
     return (int)n;
+}
+
+static int is_subpath_of_any_marked(const char *p) {
+    size_t lp = strlen(p);
+    for (size_t i = 0; i < g_marks.n; i++) {
+        const char *m = g_marks.paths[i];
+        size_t lm = strlen(m);
+        if (lm == 0) continue;
+        if (strcmp(m, p) == 0) return 0; // equal path not considered subpath
+        if (lp > lm && strncmp(p, m, lm) == 0 && p[lm] == '/') return 1;
+    }
+    return 0;
+}
+
+static unsigned long long compute_marked_total_bytes(Cache *cache) {
+    unsigned long long total = 0ULL;
+    for (size_t i = 0; i < g_marks.n; i++) {
+        const char *path = g_marks.paths[i];
+        // If this path is inside another marked directory, skip to avoid double counting
+        if (is_subpath_of_any_marked(path)) continue;
+        struct stat st;
+        if (lstat(path, &st) != 0) continue;
+        if (S_ISREG(st.st_mode)) {
+            total += (unsigned long long)st.st_size;
+        } else if (S_ISDIR(st.st_mode)) {
+            unsigned long long sz = 0ULL;
+            CacheEntry *ce = cache_get(cache, path);
+            if (ce) sz = ce->size; else sz = sum_path_size(path);
+            total += sz;
+        }
+    }
+    return total;
 }
 
 static void show_help(void) {
@@ -1912,7 +1958,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
     if (!have_cache || reload_flag) {
         erase();
-        draw_header(root, root);
+        draw_header(root, root, &cache);
         refresh();
         int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
         if (threads < 1) threads = 1;
@@ -1939,7 +1985,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     int ch;
     while (1) {
         erase();
-        draw_header(root, current);
+        draw_header(root, current, &cache);
         draw_list(&dv, top);
         refresh();
 
@@ -1947,7 +1993,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         maybe_rescan_hovered(&dv, root, &cache);
         // ridisegna list dopo possibile aggiornamento
         erase();
-        draw_header(root, current);
+        draw_header(root, current, &cache);
         draw_list(&dv, top);
         refresh();
 
