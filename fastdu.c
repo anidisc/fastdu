@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.30.1"
+#define FASTDU_VERSION "0.30"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -78,6 +78,7 @@ static void print_cli_usage(void) {
     printf("  -h, --help           Show this help and exit\n");
     printf("  -v, --version        Show version and exit\n");
     printf("  -R, --reload         Ignore cache and perform full rescan\n");
+    printf("  -H, --headless       Force headless (non-TUI) mode\n");
     printf("  -j N, --jobs N       Number of worker threads (default: CPUs)\n\n");
     printf("Examples:\n");
     printf("  fastdu                 # open TUI on current directory\n");
@@ -100,6 +101,8 @@ static void print_cli_usage(void) {
  * - relpath_from_abs/abspath_from_rel: converts between absolute and
  *   relative paths w.r.t. the scan root for on-disk persistence.
  */
+static int g_headless = 0;
+
 static char *xstrdup(const char *s) {
     if (!s) return NULL;
     size_t n = strlen(s) + 1;
@@ -476,6 +479,8 @@ static int cache_load(const char *root, Cache *c) {
     char *cache_path = path_join(root, CACHE_FILENAME);
     if (!cache_path) return -1;
     FILE *f = fopen(cache_path, "r");
+    int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
+    if (debug_cache) fprintf(stderr, "[cache] open %s\n", cache_path);
     free(cache_path);
     if (!f) return 0; // no cache file, not an error
 
@@ -483,6 +488,7 @@ static int cache_load(const char *root, Cache *c) {
     int header_ok = 0; int version = 1;
     unsigned long long totals_bytes = 0ULL;
     unsigned long long totals_files = 0ULL;
+    unsigned long long lines_read = 0ULL;
     while ((r = getline(&line, &len, f)) != -1) {
         if (r > 0 && (line[r-1] == '\n' || line[r-1] == '\r')) line[--r] = '\0';
         if (!header_ok) {
@@ -537,7 +543,11 @@ static int cache_load(const char *root, Cache *c) {
             if (ce) { ce->ino = ino; ce->dir_mtime = (time_t)dir_mtime; }
             free(abs);
         }
+        lines_read++;
+        if ((g_headless && (lines_read % 1000ULL == 0ULL)) || (debug_cache && (lines_read % 1000ULL == 0ULL)))
+            fprintf(stderr, "[cache] read %llu lines\n", (unsigned long long)lines_read);
     }
+    if (g_headless || debug_cache) fprintf(stderr, "[cache] done lines=%llu\n", (unsigned long long)lines_read);
     free(line);
     fclose(f);
     // set runtime totals from cache if present
@@ -2160,13 +2170,19 @@ static void install_signal_handlers(void) {
  */
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
+    const char *dbg_env0 = getenv("FASTDU_DEBUG");
+    if (dbg_env0 && dbg_env0[0]=='1') {
+        const char msg0[] = "[dbg0] main start\n";
+        (void)write(STDERR_FILENO, msg0, sizeof(msg0)-1);
+    }
 
-// Arg parsing: [-R|--reload] [-j N|--jobs N] [-v|--version] [-h|--help] [path]
+// Arg parsing: [-R|--reload] [-j N|--jobs N] [-v|--version] [-H|--headless] [-h|--help] [path]
     int reload_flag = 0;
     int jobs_override = 0;
     int show_version = 0;
     int cli_help_flag = 0;
     const char *path_arg = NULL;
+    int headless_flag = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-R") == 0 || strcmp(argv[i], "--reload") == 0) {
             reload_flag = 1;
@@ -2174,6 +2190,8 @@ int main(int argc, char **argv) {
             if (i + 1 < argc) { jobs_override = atoi(argv[++i]); }
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
             show_version = 1;
+        } else if (strcmp(argv[i], "-H") == 0 || strcmp(argv[i], "--headless") == 0) {
+            headless_flag = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             cli_help_flag = 1;
         } else {
@@ -2206,6 +2224,12 @@ int main(int argc, char **argv) {
     }
 
     int headless = !(isatty(STDIN_FILENO) && isatty(STDOUT_FILENO));
+    const char *env_headless = getenv("FASTDU_HEADLESS");
+    if (env_headless && env_headless[0] == '1') headless = 1;
+    if (headless_flag) headless = 1;
+    g_headless = headless;
+    int debug_all = getenv("FASTDU_DEBUG") ? 1 : 0;
+    if (debug_all) fprintf(stderr, "[dbg] args parsed: headless=%d reload=%d jobs=%d path=%s\n", headless, reload_flag, jobs_override, path_arg ? path_arg : "(cwd)");
 
     char root[PATH_MAX];
     if (!realpath(root_in, root)) {
@@ -2244,9 +2268,13 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     // Prepare cache (load or full rescan)
     Cache cache; cache_init(&cache);
     int have_cache = 0;
+    int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
+    if (debug_cache) fprintf(stderr, "[main] cache_load root=%s\n", root);
     if (!reload_flag) have_cache = cache_load(root, &cache);
+    if (debug_cache) fprintf(stderr, "[main] cache_load done have_cache=%d\n", have_cache);
     char *cache_abs = path_join(root, CACHE_FILENAME);
 
+    if (debug_all) fprintf(stderr, "[dbg] have_cache=%d reload=%d\n", have_cache, reload_flag);
     if (!have_cache || reload_flag) {
         if (!headless) {
             erase();
@@ -2268,7 +2296,8 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         CacheEntry *root_ce = cache_get(&cache, root);
         if (root_ce) g_last_bytes = root_ce->size; else g_last_bytes = 0ULL;
         // If the loaded cache (older versions) didn't persist totals_files, compute once and persist
-        if (g_last_files == 0ULL) {
+        // Skip this in headless to avoid long blocking walks before summary
+        if (!g_headless && g_last_files == 0ULL) {
             unsigned long long files_cnt = count_files_path(root);
             g_last_files = files_cnt;
             cache_save(root, &cache);
@@ -2276,13 +2305,36 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     }
 
     if (headless) {
+        if (debug_all) fprintf(stderr, "[dbg] entering headless summary branch\n");
         // In headless mode, if -R was requested we already rescanned; otherwise we may have loaded cache.
         // Print a short summary and exit.
+        // Print on stdout
         printf("fastdu %s\n", FASTDU_VERSION);
         printf("root: %s\n", root);
         printf("files: %llu\n", (unsigned long long)g_last_files);
         printf("size: %llu bytes\n", (unsigned long long)g_last_bytes);
+        fflush(stdout);
+        // Also mirror summary to stderr to avoid missing output when stdout is piped
+        fprintf(stderr, "[summary] fastdu %s\n", FASTDU_VERSION);
+        fprintf(stderr, "[summary] root: %s\n", root);
+        fprintf(stderr, "[summary] files: %llu\n", (unsigned long long)g_last_files);
+        fprintf(stderr, "[summary] size: %llu bytes\n", (unsigned long long)g_last_bytes);
+        // Low-level write to stderr as final assurance
+        {
+            char sum[512];
+            int n = snprintf(sum, sizeof(sum), "[summary2] root=%s files=%llu size=%llu\n", root, (unsigned long long)g_last_files, (unsigned long long)g_last_bytes);
+            if (n > 0) (void)write(STDERR_FILENO, sum, (size_t)((n < (int)sizeof(sum)) ? n : (int)sizeof(sum)));
+        }
+        if (debug_cache || debug_all) fprintf(stderr, "[main] headless summary printed, exiting.\n");
+        // In debug, exit immediately without further cleanup to avoid any hidden blockers
+        if (debug_all) { _exit(0); }
+        const char *skip_free = getenv("FASTDU_SKIP_FREE_CACHE");
+        if (skip_free && skip_free[0]=='1') {
+            if (debug_all) fprintf(stderr, "[dbg] skipping cache_free due to FASTDU_SKIP_FREE_CACHE=1\n");
+            _exit(0);
+        }
         cache_free(&cache);
+        if (debug_all) fprintf(stderr, "[dbg] cache_free done, exiting now\n");
         return 0;
     }
 
