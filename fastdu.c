@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.31"
+#define FASTDU_VERSION "0.32"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -79,6 +79,7 @@ static void print_cli_usage(void) {
     printf("  -v, --version        Show version and exit\n");
     printf("  -R, --reload         Ignore cache and perform full rescan\n");
     printf("  -H, --headless       Force headless (non-TUI) mode\n");
+    printf("  -ac, --accuracy      Accurate disk usage: force deep rescan and use allocated blocks (slower)\n");
     printf("  -j N, --jobs N       Number of worker threads (default: CPUs)\n\n");
     printf("Examples:\n");
     printf("  fastdu                 # open TUI on current directory\n");
@@ -102,6 +103,7 @@ static void print_cli_usage(void) {
  *   relative paths w.r.t. the scan root for on-disk persistence.
  */
 static int g_headless = 0;
+static int g_accuracy_mode = 0; // when set, compute disk usage using st_blocks and force deep rescan
 
 static char *xstrdup(const char *s) {
     if (!s) return NULL;
@@ -150,6 +152,15 @@ static void human_size(unsigned long long v, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%llu %s", (unsigned long long)v, units[i]);
     else
         snprintf(buf, bufsz, "%.1f %s", d, units[i]);
+}
+
+static inline unsigned long long file_size_bytes(const struct stat *st) {
+    if (!st) return 0ULL;
+    if (g_accuracy_mode) {
+        unsigned long long blk = (unsigned long long)st->st_blocks;
+        return blk * 512ULL; // POSIX st_blocks unit is 512 bytes
+    }
+    return (unsigned long long)st->st_size;
 }
 
 static char *get_parent(const char *path) {
@@ -698,16 +709,16 @@ static unsigned long long scan_dir_recursive_fd(int dirfd, const char *abs_path,
         if (strcmp(abs_path, root) == 0 && strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
         unsigned char dtype = de->d_type;
         if (dtype == DT_LNK) continue;
-        if (dtype == DT_UNKNOWN) {
-            struct stat st0;
-            if (fstatat(dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) != 0) continue;
-            if (S_ISLNK(st0.st_mode)) continue;
-            if (S_ISDIR(st0.st_mode)) dtype = DT_DIR; else if (S_ISREG(st0.st_mode)) dtype = DT_REG; else dtype = DT_UNKNOWN;
-            if (dtype == DT_REG) total += (unsigned long long)st0.st_size;
-        } else if (dtype == DT_REG) {
-            struct stat stf;
-            if (fstatat(dirfd, de->d_name, &stf, AT_SYMLINK_NOFOLLOW) == 0) total += (unsigned long long)stf.st_size;
-        } else if (dtype == DT_DIR) {
+            if (dtype == DT_UNKNOWN) {
+                struct stat st0;
+                if (fstatat(dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) != 0) continue;
+                if (S_ISLNK(st0.st_mode)) continue;
+                if (S_ISDIR(st0.st_mode)) dtype = DT_DIR; else if (S_ISREG(st0.st_mode)) dtype = DT_REG; else dtype = DT_UNKNOWN;
+                if (dtype == DT_REG) total += file_size_bytes(&st0);
+            } else if (dtype == DT_REG) {
+                struct stat stf;
+                if (fstatat(dirfd, de->d_name, &stf, AT_SYMLINK_NOFOLLOW) == 0) total += file_size_bytes(&stf);
+            } else if (dtype == DT_DIR) {
             int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (cfd < 0) continue;
             char *child_abs = path_join(abs_path, de->d_name);
@@ -1058,11 +1069,11 @@ static unsigned long long sum_dir_sizes_fd(int dirfd) {
         if (dt == DT_LNK) continue;
         if (dt == DT_REG) {
             struct stat st;
-            if (fstatat(dirfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) total += (unsigned long long)st.st_size;
+            if (fstatat(dirfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) total += file_size_bytes(&st);
         } else if (dt == DT_UNKNOWN) {
             struct stat st0;
             if (fstatat(dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) == 0) {
-                if (S_ISREG(st0.st_mode)) total += (unsigned long long)st0.st_size;
+                if (S_ISREG(st0.st_mode)) total += file_size_bytes(&st0);
                 else if (S_ISDIR(st0.st_mode)) {
                     int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
                     if (cfd >= 0) { total += sum_dir_sizes_fd(cfd); close(cfd); }
@@ -1080,7 +1091,7 @@ static unsigned long long sum_dir_sizes_fd(int dirfd) {
 static unsigned long long sum_path_size(const char *path) {
     struct stat st;
     if (lstat(path, &st) != 0) return 0ULL;
-    if (S_ISREG(st.st_mode)) return (unsigned long long)st.st_size;
+    if (S_ISREG(st.st_mode)) return file_size_bytes(&st);
     if (S_ISDIR(st.st_mode)) {
         int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (fd < 0) return 0ULL;
@@ -2200,22 +2211,24 @@ static void process_task(DirTask *t) {
         }
         unsigned char dt = de->d_type;
         if (dt == DT_LNK) continue;
-        if (dt == DT_UNKNOWN) {
+            if (dt == DT_UNKNOWN) {
             struct stat st0;
             if (fstatat(t->dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) != 0) continue;
             if (S_ISLNK(st0.st_mode)) continue;
             if (S_ISDIR(st0.st_mode)) dt = DT_DIR; else if (S_ISREG(st0.st_mode)) dt = DT_REG;
             if (dt == DT_REG) {
-                atomic_fetch_add(&t->files_size, (unsigned long long)st0.st_size);
+                unsigned long long b = file_size_bytes(&st0);
+                atomic_fetch_add(&t->files_size, b);
                 atomic_fetch_add(&g_total_files, 1ULL);
-                atomic_fetch_add(&g_total_bytes, (unsigned long long)st0.st_size);
+                atomic_fetch_add(&g_total_bytes, b);
             }
         } else if (dt == DT_REG) {
             struct stat stf;
             if (fstatat(t->dirfd, de->d_name, &stf, AT_SYMLINK_NOFOLLOW) == 0) {
-                atomic_fetch_add(&t->files_size, (unsigned long long)stf.st_size);
+                unsigned long long b = file_size_bytes(&stf);
+                atomic_fetch_add(&t->files_size, b);
                 atomic_fetch_add(&g_total_files, 1ULL);
-                atomic_fetch_add(&g_total_bytes, (unsigned long long)stf.st_size);
+                atomic_fetch_add(&g_total_bytes, b);
             }
         } else if (dt == DT_DIR) {
             int cfd = openat(t->dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -2443,6 +2456,8 @@ int main(int argc, char **argv) {
             headless_flag = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             cli_help_flag = 1;
+        } else if (strcmp(argv[i], "-ac") == 0 || strcmp(argv[i], "--accuracy") == 0) {
+            g_accuracy_mode = 1;
         } else {
             path_arg = argv[i];
         }
@@ -2524,6 +2539,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     char *cache_abs = path_join(root, CACHE_FILENAME);
 
     if (debug_all) fprintf(stderr, "[dbg] have_cache=%d reload=%d\n", have_cache, reload_flag);
+    if (g_accuracy_mode) reload_flag = 1; // accuracy implies deep rescan ignoring cache
     if (!have_cache || reload_flag) {
         if (!headless) {
             erase();
