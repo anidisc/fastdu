@@ -80,6 +80,7 @@ static void print_cli_usage(void) {
     printf("  -R, --reload         Ignore cache and perform full rescan\n");
     printf("  -H, --headless       Force headless (non-TUI) mode\n");
     printf("  -ac, --accuracy      Accurate disk usage: force deep rescan and use allocated blocks (slower)\n");
+    printf("  -D, --decorative     Decorative UI (column headers, vertical separator, extra colors)\n");
     printf("  -j N, --jobs N       Number of worker threads (default: CPUs)\n\n");
     printf("Examples:\n");
     printf("  fastdu                 # open TUI on current directory\n");
@@ -104,6 +105,7 @@ static void print_cli_usage(void) {
  */
 static int g_headless = 0;
 static int g_accuracy_mode = 0; // when set, compute disk usage using st_blocks and force deep rescan
+static int g_decorative = 0;    // decorative UI: separators, header bar, extra colors
 
 static char *xstrdup(const char *s) {
     if (!s) return NULL;
@@ -1420,8 +1422,8 @@ static void format_owner_perm(const char *path, char *out, size_t outsz) {
  */
 static void draw_list(const DirView *dv, int top) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
-    int y = 1; // below header
-    int list_rows = rows - 3; // header + footer
+    int y = g_decorative ? 2 : 1; // below header and optional header-bar
+    int list_rows = rows - 3 - (g_decorative ? 1 : 0); // header + footer [+ column bar]
     int sizew = compute_size_col_width(dv);
     int mark_col = 0; // mark column at 0
     int size_col = 2; // mark + space
@@ -1431,6 +1433,35 @@ static void draw_list(const DirView *dv, int top) {
     const int info_w_default = 16; // fits date comfortably
     int info_w = (g_info_col_mode == INFOCOL_HIDDEN) ? 0 : info_w_default;
     int info_col = cols - info_w - 1; if (info_col < name_col + 4) info_col = name_col + 4;
+
+    // Decorative header bar (column titles)
+    if (g_decorative) {
+        attron(COLOR_PAIR(1));
+        mvhline(1, 0, ' ', cols);
+        // Build dynamic titles
+        char size_title[16];
+        if (g_display_mode == DISP_PCT) snprintf(size_title, sizeof(size_title), "Size(%%)");
+        else snprintf(size_title, sizeof(size_title), "Size");
+        char info_title[24];
+        if (g_info_col_mode == INFOCOL_MTIME) snprintf(info_title, sizeof(info_title), "Info(mtime)");
+        else if (g_info_col_mode == INFOCOL_OWNER_PERM) snprintf(info_title, sizeof(info_title), "Info(perm)");
+        else snprintf(info_title, sizeof(info_title), "Info(hidden)");
+        // Left headings
+        mvaddnstr(1, 0, " M ", cols);
+        // Size header aligned to size column width
+        int stlen = (int)strlen(size_title);
+        int spad = (sizew > stlen) ? (sizew - stlen) : 0;
+        for (int k = 0; k < spad; k++) mvaddch(1, size_col + k, ' ');
+        mvaddnstr(1, size_col + spad, size_title, sizew - spad);
+        // Type header at exact type_col
+        mvaddnstr(1, type_col, "T", cols - type_col);
+        // Name header begins at name_col
+        int name_width = (info_col - name_col - 2);
+        if (name_width > 0) mvaddnstr(1, name_col, "Name", name_width);
+        // Right heading
+        if (info_w > 0) mvaddnstr(1, info_col, info_title, info_w);
+        attroff(COLOR_PAIR(1));
+    }
 
     // Precompute total size for percentage mode (sum of known sizes in view)
     unsigned long long view_total = 0ULL;
@@ -1478,18 +1509,49 @@ static void draw_list(const DirView *dv, int top) {
         // size column at x=size_col
         if (sizew > 0) {
             if (pad) { for (int k = 0; k < pad; k++) mvaddch(y + i, size_col + k, ' '); }
+            // colorize size according to value
+            int size_color = 5; // default small
+            unsigned long long base_sz = ve->size;
+            if (g_display_mode == DISP_PCT && ve->size_known && view_total > 0ULL) {
+                double pctv = (double)ve->size * 100.0 / (double)view_total;
+                if (pctv >= 20.0) size_color = 7; else if (pctv >= 5.0) size_color = 6; else size_color = 5;
+            } else if (ve->size_known) {
+                if (base_sz >= (1ULL<<30)) size_color = 7; // >= 1 GiB
+                else if (base_sz >= (10ULL<<20)) size_color = 6; // >= 10 MiB
+                else size_color = 5;
+            }
+            if (g_decorative) attron(COLOR_PAIR(size_color));
             mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
+            if (g_decorative) attroff(COLOR_PAIR(size_color));
+        }
+        // left vertical separator between type and name
+        if (g_decorative) {
+            attron(COLOR_PAIR(2));
+            if (name_col - 1 >= 0 && name_col - 1 < cols) mvaddch(y + i, name_col - 1, ACS_VLINE);
+            attroff(COLOR_PAIR(2));
         }
         // type
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
-        // space after type
-        mvaddch(y + i, type_col + 1, ' ');
+        // space after type only if non-decorative (in decorative mode, we place a vertical line)
+        if (!g_decorative) mvaddch(y + i, type_col + 1, ' ');
         // name uses remaining space up to right column - 1 (or full width if hidden)
         if (ve->is_dir) attron(COLOR_PAIR(3)); else attron(COLOR_PAIR(4));
         int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - 1) : (info_col - name_col - 1);
         if (name_max < 0) name_max = 0;
         mvaddnstr(y + i, name_col, ve->name, name_max);
         if (ve->is_dir) attroff(COLOR_PAIR(3)); else attroff(COLOR_PAIR(4));
+        // left vertical separator between type and name (after drawing type and name)
+        if (g_decorative) {
+            attron(COLOR_PAIR(2));
+            if (name_col - 1 >= 0 && name_col - 1 < cols) mvaddch(y + i, name_col - 1, ACS_VLINE);
+            attroff(COLOR_PAIR(2));
+        }
+        // draw vertical separator between left and right
+        if (g_decorative && info_w > 0) {
+            attron(COLOR_PAIR(2));
+            mvaddch(y + i, info_col - 1, ACS_VLINE);
+            attroff(COLOR_PAIR(2));
+        }
         // right info column content (mtime / owner+perm)
         if (info_w > 0) {
             char ibuf[64]; ibuf[0] = '\0';
@@ -2596,6 +2658,8 @@ int main(int argc, char **argv) {
             cli_help_flag = 1;
         } else if (strcmp(argv[i], "-ac") == 0 || strcmp(argv[i], "--accuracy") == 0) {
             g_accuracy_mode = 1;
+        } else if (strcmp(argv[i], "-D") == 0 || strcmp(argv[i], "--decorative") == 0) {
+            g_decorative = 1;
         } else {
             path_arg = argv[i];
         }
@@ -2662,8 +2726,12 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
             use_default_colors();
     #endif
             init_pair(1, COLOR_BLACK, COLOR_CYAN);   // header/footer
-            init_pair(3, COLOR_CYAN, COLOR_BLACK);   // dirs
-            init_pair(4, COLOR_WHITE, COLOR_BLACK);  // files
+            init_pair(2, COLOR_CYAN, -1);            // separators / accents
+            init_pair(3, COLOR_CYAN, COLOR_BLACK);   // dirs (names)
+            init_pair(4, COLOR_WHITE, COLOR_BLACK);  // files (names)
+            init_pair(5, COLOR_GREEN, -1);           // size small
+            init_pair(6, COLOR_YELLOW, -1);          // size medium
+            init_pair(7, COLOR_RED, -1);             // size large
         }
     }
 
