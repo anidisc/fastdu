@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.32.1"
+#define FASTDU_VERSION "0.33"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -492,8 +492,18 @@ static int cache_load(const char *root, Cache *c) {
     FILE *f = fopen(cache_path, "r");
     int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
     if (debug_cache) fprintf(stderr, "[cache] open %s\n", cache_path);
-    free(cache_path);
-    if (!f) return 0; // no cache file, not an error
+    if (!f) { free(cache_path); return 0; } // no cache file, not an error
+
+    // Determine file size for progress
+    long total_bytes = 0;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long pos = ftell(f);
+        if (pos > 0) total_bytes = pos;
+        fseek(f, 0, SEEK_SET);
+    }
+    int ui_enabled = (g_tui_active ? 1 : 0);
+    struct timespec last_draw; clock_gettime(CLOCK_MONOTONIC, &last_draw);
+    int spinner = 0;
 
     char *line = NULL; size_t len = 0; ssize_t r;
     int header_ok = 0; int version = 1;
@@ -506,43 +516,144 @@ static int cache_load(const char *root, Cache *c) {
             if (strncmp(line, "# fastdu-cache v3", 18) == 0) { header_ok = 1; version = 3; }
             else if (strncmp(line, "# fastdu-cache v2", 18) == 0) { header_ok = 1; version = 2; }
             else if (strncmp(line, "# fastdu-cache v1", 18) == 0) { header_ok = 1; version = 1; }
+            // update progress
+            if (ui_enabled) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
+                if (ms >= 30) {
+                    last_draw = now;
+                    int cols, rows; getmaxyx(stdscr, rows, cols);
+                    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
+                    char bar[256]; memset(bar, '.', (size_t)barlen);
+                    int filled = 0; int percent = 0;
+                    if (total_bytes > 0) {
+                        long cur = ftell(f);
+                        if (cur < 0) cur = 0;
+                        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+                        filled = (int)(frac * barlen);
+                        percent = (int)(frac * 100.0 + 0.5);
+                    } else {
+                        spinner = (spinner + 1) % barlen; filled = spinner;
+                        percent = 0;
+                    }
+                    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
+                    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
+                    char linebuf[PATH_MAX + 256];
+                    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
+                    mvhline(rows-1, 0, ' ', cols);
+                    mvaddnstr(rows-1, 0, linebuf, cols-1);
+                    refresh();
+                }
+            }
             continue;
         }
         if (strncmp(line, "root\t", 5) == 0) {
             // informational, ignore value
+            if (ui_enabled) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
+                if (ms >= 30) {
+                    last_draw = now;
+                    int cols, rows; getmaxyx(stdscr, rows, cols);
+                    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
+                    char bar[256]; memset(bar, '.', (size_t)barlen);
+                    int filled = 0; int percent = 0;
+                    if (total_bytes > 0) {
+                        long cur = ftell(f); if (cur < 0) cur = 0;
+                        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+                        filled = (int)(frac * barlen);
+                        percent = (int)(frac * 100.0 + 0.5);
+                    } else { spinner = (spinner + 1) % barlen; filled = spinner; }
+                    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
+                    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
+                    char linebuf[PATH_MAX + 256];
+                    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
+                    mvhline(rows-1, 0, ' ', cols);
+                    mvaddnstr(rows-1, 0, linebuf, cols-1);
+                    refresh();
+                }
+            }
             continue;
         }
         if (version >= 3 && strncmp(line, "totals\t", 8) == 0) {
             const char *b = line + 8;
             unsigned long long v = 0ULL; sscanf(b, "%llu", &v);
             totals_bytes = v;
+            if (ui_enabled) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
+                if (ms >= 30) {
+                    last_draw = now;
+                    int cols, rows; getmaxyx(stdscr, rows, cols);
+                    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
+                    char bar[256]; memset(bar, '.', (size_t)barlen);
+                    int filled = 0; int percent = 0;
+                    if (total_bytes > 0) {
+                        long cur = ftell(f); if (cur < 0) cur = 0;
+                        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+                        filled = (int)(frac * barlen);
+                        percent = (int)(frac * 100.0 + 0.5);
+                    } else { spinner = (spinner + 1) % barlen; filled = spinner; }
+                    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
+                    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
+                    char linebuf[PATH_MAX + 256];
+                    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
+                    mvhline(rows-1, 0, ' ', cols);
+                    mvaddnstr(rows-1, 0, linebuf, cols-1);
+                    refresh();
+                }
+            }
             continue;
         }
         if (version >= 3 && strncmp(line, "totals_files\t", 14) == 0) {
             const char *b = line + 14;
             unsigned long long v = 0ULL; sscanf(b, "%llu", &v);
             totals_files = v;
+            if (ui_enabled) {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
+                if (ms >= 30) {
+                    last_draw = now;
+                    int cols, rows; getmaxyx(stdscr, rows, cols);
+                    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
+                    char bar[256]; memset(bar, '.', (size_t)barlen);
+                    int filled = 0; int percent = 0;
+                    if (total_bytes > 0) {
+                        long cur = ftell(f); if (cur < 0) cur = 0;
+                        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+                        filled = (int)(frac * barlen);
+                        percent = (int)(frac * 100.0 + 0.5);
+                    } else { spinner = (spinner + 1) % barlen; filled = spinner; }
+                    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
+                    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
+                    char linebuf[PATH_MAX + 256];
+                    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
+                    mvhline(rows-1, 0, ' ', cols);
+                    mvaddnstr(rows-1, 0, linebuf, cols-1);
+                    refresh();
+                }
+            }
             continue;
         }
         if (line[0] == 'D' && line[1] == '\t') {
             char *p = line + 2;
             char *rel = p;
-            char *tab1 = strchr(p, '\t'); if (!tab1) continue; *tab1 = '\0';
+            char *tab1 = strchr(p, '\t'); if (!tab1) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; } *tab1 = '\0';
             char *size_str = tab1 + 1;
-            char *tab2 = strchr(size_str, '\t'); if (!tab2) continue; *tab2 = '\0';
+            char *tab2 = strchr(size_str, '\t'); if (!tab2) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; } *tab2 = '\0';
             char *time_str = tab2 + 1;
             char *ino_str = NULL; char *mtime_str = NULL;
             if (version >= 2) {
-                char *tab3 = strchr(time_str, '\t'); if (!tab3) continue; *tab3 = '\0';
+                char *tab3 = strchr(time_str, '\t'); if (!tab3) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; } *tab3 = '\0';
                 ino_str = tab3 + 1;
-                char *tab4 = strchr(ino_str, '\t'); if (!tab4) continue; *tab4 = '\0';
+                char *tab4 = strchr(ino_str, '\t'); if (!tab4) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; } *tab4 = '\0';
                 mtime_str = tab4 + 1;
             }
             char *rel_dec = pct_decode(rel);
-            if (!rel_dec) continue;
+            if (!rel_dec) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; }
             char *abs = abspath_from_rel(root, rel_dec);
             free(rel_dec);
-            if (!abs) continue;
+            if (!abs) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; }
             unsigned long long size = 0ULL;
             long last_scan = 0;
             unsigned long long ino = 0ULL; long dir_mtime = 0;
@@ -557,10 +668,37 @@ static int cache_load(const char *root, Cache *c) {
         lines_read++;
         if ((g_headless && (lines_read % 1000ULL == 0ULL)) || (debug_cache && (lines_read % 1000ULL == 0ULL)))
             fprintf(stderr, "[cache] read %llu lines\n", (unsigned long long)lines_read);
+        if (ui_enabled) {
+            struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+            long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
+            if (ms >= 30) {
+                last_draw = now;
+                int cols, rows; getmaxyx(stdscr, rows, cols);
+                int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
+                char bar[256]; memset(bar, '.', (size_t)barlen);
+                int filled = 0; int percent = 0;
+                if (total_bytes > 0) {
+                    long cur = ftell(f); if (cur < 0) cur = 0;
+                    double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+                    filled = (int)(frac * barlen);
+                    percent = (int)(frac * 100.0 + 0.5);
+                } else { spinner = (spinner + 1) % barlen; filled = spinner; }
+                if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
+                for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
+                char linebuf[PATH_MAX + 256];
+                snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
+                mvhline(rows-1, 0, ' ', cols);
+                mvaddnstr(rows-1, 0, linebuf, cols-1);
+                refresh();
+            }
+        }
     }
     if (g_headless || debug_cache) fprintf(stderr, "[cache] done lines=%llu\n", (unsigned long long)lines_read);
+    // Clear progress line if UI is active
+    if (ui_enabled) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
     free(line);
     fclose(f);
+    free(cache_path);
     // set runtime totals from cache if present
     if (totals_files > 0ULL) g_last_files = totals_files;
     return 1; // loaded
