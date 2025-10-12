@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.30"
+#define FASTDU_VERSION "0.31"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -1529,6 +1529,7 @@ static void show_help(void) {
         "  b - go to top, e - go to end",
         "",
         "Actions:",
+        "  v - preview selected text file (scrollable layer)",
         "  r - rescan selected dir",
         "  R - rescan current dir",
         "  f - find by name (case-insensitive), n/N next/prev",
@@ -1593,6 +1594,254 @@ static void show_help(void) {
 
     delwin(win);
     // Underlying screen will be redrawn by main loop on return
+}
+
+/*
+ * Text file detection and preview layer
+ */
+static int is_textual_file(const char *path) {
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    unsigned char buf[8192];
+    ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n <= 0) return 1; // empty files are considered text
+    // simple UTF-8 aware heuristic
+    size_t i = 0; size_t bad = 0; size_t total = (size_t)n;
+    while (i < (size_t)n) {
+        unsigned char c = buf[i];
+        if (c == '\0') { bad++; i++; continue; }
+        if (c < 0x20) {
+            if (c=='\n' || c=='\r' || c=='\t' || c==0x0C) { i++; continue; }
+            bad++; i++; continue;
+        }
+        if (c < 0x80) { i++; continue; }
+        // UTF-8 leading byte
+        size_t need = 0;
+        if ((c & 0xE0) == 0xC0) need = 1; // 2-byte
+        else if ((c & 0xF0) == 0xE0) need = 2; // 3-byte
+        else if ((c & 0xF8) == 0xF0) need = 3; // 4-byte
+        else { bad++; i++; continue; }
+        if (i + need >= (size_t)n) { // truncated sample: assume ok
+            break;
+        }
+        int ok = 1;
+        for (size_t k = 1; k <= need; k++) {
+            unsigned char cc = buf[i+k];
+            if ((cc & 0xC0) != 0x80) { ok = 0; break; }
+        }
+        if (!ok) { bad++; i++; continue; }
+        i += need + 1;
+    }
+    double ratio = (total > 0) ? ((double)bad / (double)total) : 0.0;
+    return ratio <= 0.15; // allow up to 15% control/invalid bytes
+}
+
+static void show_preview(const char *path) {
+    // Try open file and read lines up to a cap
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        char msg[PATH_MAX + 64];
+        snprintf(msg, sizeof(msg), "Cannot open '%s'", path_basename_const(path));
+        draw_status(msg);
+        return;
+    }
+
+    const size_t MAX_BYTES = 2 * 1024 * 1024; // 2 MiB cap for preview
+    const size_t MAX_LINES = 20000;
+    char **lines = NULL; size_t nlines = 0, cap = 0;
+    size_t bytes = 0;
+    size_t max_line_len = 0;
+    char *line = NULL; size_t linecap = 0; ssize_t linelen;
+    while ((linelen = getline(&line, &linecap, fp)) != -1) {
+        if (bytes + (size_t)linelen > MAX_BYTES) break;
+        if (nlines == cap) { size_t nc = cap ? cap * 2 : 512; void *nv = realloc(lines, nc * sizeof(char*)); if (!nv) break; lines = (char**)nv; cap = nc; }
+        // strip CRLF
+        while (linelen > 0 && (line[linelen-1] == '\n' || line[linelen-1] == '\r')) linelen--;
+        char *copy = (char*)malloc((size_t)linelen + 1);
+        if (!copy) break;
+        memcpy(copy, line, (size_t)linelen); copy[linelen] = '\0';
+        lines[nlines++] = copy;
+        bytes += (size_t)linelen;
+        if ((size_t)linelen > max_line_len) max_line_len = (size_t)linelen;
+        if (nlines >= MAX_LINES) break;
+    }
+    free(line);
+    fclose(fp);
+
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    int w = cols - 8; if (w < 48) w = cols - 4; if (w < 32) w = cols;
+    int h = rows - 8; if (h < 10) h = rows - 4; if (h < 8) h = rows;
+    int x = (cols - w) / 2; if (x < 0) x = 0;
+    int y = (rows - h) / 2; if (y < 0) y = 0;
+
+    WINDOW *win = newwin(h, w, y, x);
+    keypad(win, TRUE);
+
+    int view_lines = h - 2; if (view_lines < 1) view_lines = 1;
+    int off = 0;
+
+    // Build initial wrapped lines according to current content width
+    int cw = w - 4; if (cw < 1) cw = 1;
+    char **wrap = NULL; size_t nwrap = 0, wrapcap = 0;
+
+    #define APPEND_WRAP_SEG(SRC_PTR, LEN_VAL) do { \
+        size_t __len = (size_t)(LEN_VAL); \
+        char *__seg = (char*)malloc(__len + 1); \
+        if (!__seg) break; \
+        memcpy(__seg, (SRC_PTR), __len); __seg[__len] = '\0'; \
+        if (nwrap == wrapcap) { \
+            size_t __nc = wrapcap ? wrapcap * 2 : 1024; \
+            void *__nv = realloc(wrap, __nc * sizeof(char*)); \
+            if (!__nv) { free(__seg); break; } \
+            wrap = (char**)__nv; wrapcap = __nc; \
+        } \
+        wrap[nwrap++] = __seg; \
+    } while (0)
+
+    #define FREE_WRAP() do { \
+        for (size_t __i = 0; __i < nwrap; __i++) free(wrap[__i]); \
+        free(wrap); wrap = NULL; nwrap = 0; wrapcap = 0; \
+    } while (0)
+
+    #define REBUILD_WRAP() do { \
+        FREE_WRAP(); \
+        if (cw < 1) cw = 1; \
+        for (size_t __li = 0; __li < nlines; __li++) { \
+            const char *__s = lines[__li]; \
+            size_t __len = strlen(__s); \
+            if (__len == 0) { APPEND_WRAP_SEG("", 0); continue; } \
+            size_t __pos = 0; \
+            while (__pos < __len) { \
+                size_t __remain = __len - __pos; \
+                if (__remain <= (size_t)cw) { \
+                    APPEND_WRAP_SEG(__s + __pos, __remain); \
+                    __pos = __len; \
+                    break; \
+                } \
+                size_t __take = (size_t)cw; \
+                size_t __k = __pos + __take; \
+                int __found = 0; \
+                while (__k > __pos) { \
+                    unsigned char __c = (unsigned char)__s[__k - 1]; \
+                    if (__c == ' ' || __c == '\t' || __c == '-' || __c == ',' || __c == ';' || __c == ':' || __c == '.') { __found = 1; break; } \
+                    __k--; \
+                } \
+                size_t __seglen = __found ? (__k - __pos) : __take; \
+                if (__seglen == 0) __seglen = __take; \
+                APPEND_WRAP_SEG(__s + __pos, __seglen); \
+                __pos += __seglen; \
+                if (__pos < __len && __s[__pos] == ' ') __pos++; \
+            } \
+        } \
+        if (off > (int)nwrap - 1) off = (int)((nwrap > 0) ? (nwrap - 1) : 0); \
+    } while (0)
+
+    REBUILD_WRAP();
+
+    int wrap_on = 1; // wrapping abilitato di default
+    int h_off = 0;   // offset orizzontale quando wrapping è OFF
+
+    char title[PATH_MAX + 64];
+    const char *base = path_basename_const(path);
+    snprintf(title, sizeof(title), " Preview: %s - q to close ", base);
+
+    int last_cols = cols, last_rows = rows, last_w = w, last_h = h;
+
+    for (;;) {
+        // Handle terminal resize: rebuild window and wrapping if necessario
+        getmaxyx(stdscr, rows, cols);
+        int nw = cols - 8; if (nw < 48) nw = cols - 4; if (nw < 32) nw = cols;
+        int nh = rows - 8; if (nh < 10) nh = rows - 4; if (nh < 8) nh = rows;
+        if (nw != last_w || nh != last_h) {
+            if (win) delwin(win);
+            w = nw; h = nh; last_w = nw; last_h = nh;
+            int nx = (cols - w) / 2; if (nx < 0) nx = 0;
+            int ny = (rows - h) / 2; if (ny < 0) ny = 0;
+            x = nx; y = ny;
+            win = newwin(h, w, y, x);
+            keypad(win, TRUE);
+            view_lines = h - 2; if (view_lines < 1) view_lines = 1;
+            cw = w - 4; if (cw < 1) cw = 1;
+            if (wrap_on) REBUILD_WRAP();
+            // clamp horizontal offset when wrap OFF
+            if (!wrap_on) {
+                int max_h = (int)((max_line_len > (size_t)cw) ? (max_line_len - (size_t)cw) : 0);
+                if (h_off > max_h) h_off = max_h;
+            }
+        }
+
+        werase(win);
+        box(win, 0, 0);
+        // Title
+        snprintf(title, sizeof(title), " Preview: %s %s - q to close ", base, wrap_on ? "[WRAP]" : "[NO WRAP]");
+        wattron(win, A_REVERSE | A_BOLD);
+        mvwaddnstr(win, 0, 2, title, w - 4);
+        wattroff(win, A_REVERSE | A_BOLD);
+        // Content
+        if (wrap_on) {
+            for (int i = 0; i < view_lines; i++) {
+                size_t wi = (size_t)off + (size_t)i;
+                if (wi >= nwrap) break;
+                mvwaddnstr(win, 1 + i, 2, wrap[wi], w - 4);
+            }
+        } else {
+            for (int i = 0; i < view_lines; i++) {
+                size_t li = (size_t)off + (size_t)i;
+                if (li >= nlines) break;
+                const char *s = lines[li];
+                size_t sl = strlen(s);
+                if ((size_t)h_off >= sl) {
+                    // nothing visible on this line
+                    continue;
+                }
+                const char *sp = s + h_off;
+                int avail = cw;
+                int to_print = (int)((size_t)avail < (sl - (size_t)h_off) ? (size_t)avail : (sl - (size_t)h_off));
+                if (to_print > 0) mvwaddnstr(win, 1 + i, 2, sp, to_print);
+            }
+        }
+        // If truncated, show hint in last line
+        if (bytes >= MAX_BYTES || nlines >= MAX_LINES) {
+            const char *hint = "[truncated preview]";
+            mvwaddnstr(win, h - 1, w - (int)strlen(hint) - 2, hint, (int)strlen(hint));
+        }
+        wrefresh(win);
+        int ch = wgetch(win);
+        if (ch == 'q' || ch == 'Q' || ch == 27) break;
+        else if (ch == 'w' || ch == 'W') {
+            // toggle wrapping
+            wrap_on = !wrap_on;
+            if (wrap_on) { h_off = 0; REBUILD_WRAP(); if (off > (int)nwrap - 1) off = (int)((nwrap > 0) ? (nwrap - 1) : 0); }
+            else { h_off = 0; if (off > (int)nlines - 1) off = (int)((nlines > 0) ? (nlines - 1) : 0); }
+        }
+        else if (ch == KEY_UP || ch == 'k') { if (off > 0) off--; }
+        else if (ch == KEY_DOWN || ch == 'j') {
+            if (wrap_on) { if (off + view_lines < (int)nwrap) off++; }
+            else { if (off + view_lines < (int)nlines) off++; }
+        }
+        else if (ch == KEY_PPAGE) { off -= view_lines; if (off < 0) off = 0; }
+        else if (ch == KEY_NPAGE) {
+            if (wrap_on) { off += view_lines; if (off + view_lines > (int)nwrap) off = (nwrap > (size_t)view_lines) ? ((int)nwrap - view_lines) : 0; }
+            else { off += view_lines; if (off + view_lines > (int)nlines) off = (nlines > (size_t)view_lines) ? ((int)nlines - view_lines) : 0; }
+        }
+        else if (ch == 'g') { off = 0; }
+        else if (ch == 'G') { if (wrap_on) off = (nwrap > (size_t)view_lines) ? ((int)nwrap - view_lines) : 0; else off = (nlines > (size_t)view_lines) ? ((int)nlines - view_lines) : 0; }
+        else if (!wrap_on && (ch == KEY_LEFT || ch == 'h')) { if (h_off > 0) h_off--; }
+        else if (!wrap_on && (ch == KEY_RIGHT || ch == 'l')) {
+            int max_h = (int)((max_line_len > (size_t)cw) ? (max_line_len - (size_t)cw) : 0);
+            if (h_off < max_h) h_off++;
+        }
+    }
+
+    delwin(win);
+    FREE_WRAP();
+    for (size_t i = 0; i < nlines; i++) free(lines[i]);
+    free(lines);
+
+    #undef APPEND_WRAP_SEG
+    #undef FREE_WRAP
+    #undef REBUILD_WRAP
 }
 
 static int confirm_delete_prompt(const char *name, int is_dir) {
@@ -2602,6 +2851,19 @@ draw_status("No elements match the regex");
                     if ((int)dv.selected < top) top = (int)dv.selected;
                 } else {
                     draw_status("Nothing Found");
+                }
+            }
+        } else if (ch == 'v' || ch == 'V') {
+            if (dv.n > 0) {
+                ViewEntry *ve = &dv.v[dv.selected];
+                if (ve->is_dir) {
+                    draw_status("Preview available only on files");
+                } else {
+                    if (is_textual_file(ve->abs_path)) {
+                        show_preview(ve->abs_path);
+                    } else {
+                        draw_status("Not a text file (binary or unsupported encoding)");
+                    }
                 }
             }
         } else if (ch == 'o' || ch == 'O') {
