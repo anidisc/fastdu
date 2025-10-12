@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.32"
+#define FASTDU_VERSION "0.32.1"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -1010,7 +1010,7 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
             if (ce) { ve->size = ce->size; ve->size_known = 1; }
             else { ve->size = 0ULL; ve->size_known = 0; }
         } else if (dtype == DT_REG) {
-            ve->size = (unsigned long long)st.st_size;
+            ve->size = file_size_bytes(&st);
             ve->size_known = 1;
         } else {
             ve->size = 0ULL; ve->size_known = 1;
@@ -2546,10 +2546,23 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
             draw_header(root, root, &cache);
             refresh();
         }
-        int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
-        if (threads < 1) threads = 1;
-        if (threads > 64) threads = 64;
-        (void)scan_dir_parallel_deep(root, cache_abs, &cache, threads);
+        if (g_accuracy_mode) {
+            // Strict single-thread recursive scan with UI progress
+            ScanUI ui = { .enabled = (g_tui_active ? 1 : 0), .count = 0, .phase = "Scanning (accurate)" };
+            clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
+            (void)scan_dir_recursive(root, root, cache_abs, &cache, &ui);
+            // Clear progress line
+            if (!headless) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
+            // Totali accurati
+            CacheEntry *root_ce = cache_get(&cache, root);
+            g_last_bytes = root_ce ? root_ce->size : 0ULL;
+            g_last_files = count_files_path(root);
+        } else {
+            int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
+            if (threads < 1) threads = 1;
+            if (threads > 64) threads = 64;
+            (void)scan_dir_parallel_deep(root, cache_abs, &cache, threads);
+        }
         cache_save(root, &cache);
         if (!headless) {
             int cols, rows; getmaxyx(stdscr, rows, cols);
