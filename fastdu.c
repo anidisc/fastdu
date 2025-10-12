@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.33"
+#define FASTDU_VERSION "0.34.1"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -1422,8 +1422,8 @@ static void format_owner_perm(const char *path, char *out, size_t outsz) {
  */
 static void draw_list(const DirView *dv, int top) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
-    int y = g_decorative ? 2 : 1; // below header and optional header-bar
-    int list_rows = rows - 3 - (g_decorative ? 1 : 0); // header + footer [+ column bar]
+    int y = g_decorative ? 3 : 1; // below header and optional header-bar + thin line
+    int list_rows = rows - 3 - (g_decorative ? 2 : 0); // header + footer [+ column bar + thin line]
     int sizew = compute_size_col_width(dv);
     int mark_col = 0; // mark column at 0
     int size_col = 2; // mark + space
@@ -1461,6 +1461,10 @@ static void draw_list(const DirView *dv, int top) {
         // Right heading
         if (info_w > 0) mvaddnstr(1, info_col, info_title, info_w);
         attroff(COLOR_PAIR(1));
+        // Thin horizontal line below headerbar
+        attron(COLOR_PAIR(2));
+        mvhline(2, 0, ACS_HLINE, cols);
+        attroff(COLOR_PAIR(2));
     }
 
     // Precompute total size for percentage mode (sum of known sizes in view)
