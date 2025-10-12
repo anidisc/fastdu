@@ -68,7 +68,7 @@
 static volatile sig_atomic_t g_tui_active;
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.34.1"
+#define FASTDU_VERSION "0.34.2"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -2858,8 +2858,8 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
             if ((int)dv.selected < top) top = (int)dv.selected;
         } else if (ch == KEY_DOWN || ch == 'j') {
             if (dv.selected + 1 < dv.n) dv.selected++;
-            int rows, cols; getmaxyx(stdscr, rows, cols);
-            int list_rows = rows - 3;
+int rows, cols; getmaxyx(stdscr, rows, cols);
+int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
         } else if (ch == 10 || ch == KEY_RIGHT || ch == 'l') { // Enter
             if (dv.n > 0) {
@@ -2901,7 +2901,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                         dv.selected = (dv.n > 0) ? (idx < dv.n ? idx : dv.n - 1) : 0;
                         top = st.top;
                         // Ensure visibility
-                        int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                         if ((int)dv.selected < top) top = (int)dv.selected;
                         free(st.parent_path); free(st.child_path);
@@ -2958,8 +2958,8 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                 }
                 if (found) dv.selected = new_idx; else dv.selected = (old_selected < dv.n ? old_selected : (dv.n ? dv.n-1 : 0));
                 // ensure visibility
-                int rows, cols; getmaxyx(stdscr, rows, cols);
-                int list_rows = rows - 3;
+int rows, cols; getmaxyx(stdscr, rows, cols);
+                int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                 if ((int)dv.selected < top) top = (int)dv.selected;
                 if (sel_path) free(sel_path);
@@ -3009,7 +3009,7 @@ draw_status("Selected all in view");
                     if (found >= 0) {
                         dv.selected = (size_t)found;
                         int rows, cols; getmaxyx(stdscr, rows, cols);
-                        int list_rows = rows - 3;
+int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                         if ((int)dv.selected < top) top = (int)dv.selected;
                     } else {
@@ -3048,7 +3048,7 @@ draw_status("No elements match the regex");
                             for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
                             if (found) dv.selected = new_idx; else dv.selected = 0;
                         }
-                        int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                         if ((int)dv.selected < top) top = (int)dv.selected;
                         if (top < 0) top = 0;
@@ -3085,7 +3085,7 @@ draw_status("No elements match the regex");
                 if (found >= 0) {
                     dv.selected = (size_t)found;
                     int rows, cols; getmaxyx(stdscr, rows, cols);
-                    int list_rows = rows - 3;
+int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                     if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                     if ((int)dv.selected < top) top = (int)dv.selected;
                 } else {
@@ -3138,7 +3138,7 @@ draw_status("No elements match the regex");
                 for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
                 if (found) dv.selected = new_idx; else dv.selected = 0;
                 // adjust top so selection visible
-                int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                 if ((int)dv.selected < top) top = (int)dv.selected;
                 if (top < 0) top = 0;
@@ -3168,7 +3168,7 @@ draw_status("No elements match the query");
                         if (found) dv.selected = new_idx; else dv.selected = 0;
                     }
                     // adjust top so selection visible
-                    int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
+int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                     if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                     if ((int)dv.selected < top) top = (int)dv.selected;
                     if (top < 0) top = 0;
