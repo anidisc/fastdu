@@ -60,6 +60,7 @@
 #include <signal.h>
 #include <regex.h>
 #include <pwd.h>
+#include <sys/wait.h>
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -1725,6 +1726,38 @@ static unsigned long long compute_marked_total_bytes(Cache *cache) {
     return total;
 }
 
+static void open_shell(const char *path) {
+    def_prog_mode();
+    endwin();
+    system("clear");
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork");
+    } else if (pid == 0) {
+        // child
+        if (path && chdir(path) != 0) {
+            fprintf(stderr, "fastdu: chdir to '%s' failed: %s\n", path, strerror(errno));
+        }
+        const char *shell = getenv("SHELL");
+        if (!shell || *shell == '\0') shell = "/bin/sh";
+        printf("Starting shell in '%s'. Type 'exit' to return.\n", path ? path : "current directory");
+        fflush(stdout);
+        execl(shell, shell, (char *)NULL);
+        fprintf(stderr, "fastdu: execl of '%s' failed: %s\n", shell, strerror(errno));
+        exit(127);
+    } else {
+        // parent
+        int status;
+        waitpid(pid, &status, 0);
+    }
+
+    // back in parent
+    reset_prog_mode();
+    touchwin(stdscr);
+    wrefresh(stdscr);
+}
+
 static void show_help(void) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
     int w = cols - 8; if (w < 48) w = cols - 4; if (w < 32) w = cols;
@@ -1756,10 +1789,11 @@ static void show_help(void) {
         "  m - move marked to current directory",
         "  c - copy marked to current directory (with progress)",
         "  d - delete marked (if any) else delete selected",
+        "  p - open shell in selected dir (or current view)",
         "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
-"  I - size display: numeric → percent → off",
-"  i - info column (mtime → owner+perm → hidden)",
+        "  i - size display: numeric → percent → off",
+        "  I - info column (mtime → owner+perm → hidden)",
         "  q - quit",
         "  h - this help",
         "",
@@ -3105,7 +3139,20 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                     }
                 }
             }
-        } else if (ch == 'o' || ch == 'O') {
+        } else if (ch == 'p') {
+            char *target_dir = NULL;
+            if (dv.n > 0 && dv.selected < dv.n) {
+                ViewEntry *ve = &dv.v[dv.selected];
+                if (ve->is_dir) {
+                    target_dir = xstrdup(ve->abs_path);
+                }
+            }
+            if (!target_dir) {
+                target_dir = xstrdup(dv.path);
+            }
+            open_shell(target_dir);
+            free(target_dir);
+        } else if (ch == 'o') {
             // cycle sort key (size -> name -> mtime -> size), keep selection on same path
             SortMode next_mode = (g_sort_mode == SORT_SIZE) ? SORT_NAME : (g_sort_mode == SORT_NAME ? SORT_MTIME : SORT_SIZE);
             if (dv.n > 0) {
@@ -3120,11 +3167,11 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             } else {
                 g_sort_mode = next_mode;
             }
-        } else if (ch == 'i') {
+        } else if (ch == 'I') {
             // cycle info column (mtime -> owner+perm -> hidden -> mtime)
             g_info_col_mode = (g_info_col_mode == INFOCOL_MTIME) ? INFOCOL_OWNER_PERM : (g_info_col_mode == INFOCOL_OWNER_PERM ? INFOCOL_HIDDEN : INFOCOL_MTIME);
             // redraw on next loop
-        } else if (ch == 'I') {
+        } else if (ch == 'i') {
             // cycle left size column display: numeric -> percentage -> off -> numeric
             g_display_mode = (g_display_mode == DISP_NUM) ? DISP_PCT : (g_display_mode == DISP_PCT ? DISP_OFF : DISP_NUM);
         } else if (ch == 't') {
