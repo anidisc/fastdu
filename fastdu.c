@@ -113,6 +113,7 @@ static int g_headless = 0;
 static int g_accuracy_mode = 0; // when set, compute disk usage using st_blocks and force deep rescan
 static int g_decorative = 0;    // decorative UI: separators, header bar, extra colors
 static int g_one_file_system = 0;
+static int g_show_graph = 1;
 static dev_t g_root_dev = 0;
 
 static char *xstrdup(const char *s) {
@@ -1728,9 +1729,9 @@ static void draw_list(const DirView *dv, int top) {
     int mark_col = 0; // mark column at 0
     int size_col = 2; // mark + space
     int type_col = size_col + (sizew > 0 ? (sizew + 1) : 0); // if size hidden, no gap
-    int bar_w = 12; // [##########]
+    int bar_w = g_show_graph ? 12 : 0; // [##########]
     int bar_col = type_col + 2;
-    int name_col = bar_col + bar_w + 1;
+    int name_col = type_col + (g_show_graph ? (bar_w + 3) : 2);
     // Right column anchored to right; width depends only on info mode
     const int info_w_default = 16; // fits date comfortably
     int info_w = (g_info_col_mode == INFOCOL_HIDDEN) ? 0 : info_w_default;
@@ -1758,7 +1759,7 @@ static void draw_list(const DirView *dv, int top) {
         // Type header at exact type_col
         mvaddnstr(1, type_col, "T", cols - type_col);
         // Bar header
-        mvaddnstr(1, bar_col, "Graph", bar_w);
+        if (g_show_graph) mvaddnstr(1, bar_col, "Graph", bar_w);
         // Name header begins at name_col
         int name_width = (info_col - name_col - 2);
         if (name_width > 0) mvaddnstr(1, name_col, "Name", name_width);
@@ -1837,20 +1838,22 @@ static void draw_list(const DirView *dv, int top) {
             attroff(COLOR_PAIR(2));
         }
         // graph bar
-        char barbuf[16];
-        barbuf[0] = '[';
-        int filled = 0;
-        if (ve->size_known && view_total > 0) {
-            double frac = (double)ve->size / (double)view_total;
-            filled = (int)(frac * 10.0 + 0.5);
-            if (filled > 10) filled = 10;
+        if (g_show_graph) {
+            char barbuf[16];
+            barbuf[0] = '[';
+            int filled = 0;
+            if (ve->size_known && view_total > 0) {
+                double frac = (double)ve->size / (double)view_total;
+                filled = (int)(frac * 10.0 + 0.5);
+                if (filled > 10) filled = 10;
+            }
+            for (int k = 0; k < 10; k++) barbuf[k+1] = (k < filled) ? '#' : ' ';
+            barbuf[11] = ']';
+            barbuf[12] = '\0';
+            if (g_decorative) attron(COLOR_PAIR(2));
+            mvaddnstr(y + i, bar_col, barbuf, bar_w);
+            if (g_decorative) attroff(COLOR_PAIR(2));
         }
-        for (int k = 0; k < 10; k++) barbuf[k+1] = (k < filled) ? '#' : ' ';
-        barbuf[11] = ']';
-        barbuf[12] = '\0';
-        if (g_decorative) attron(COLOR_PAIR(2));
-        mvaddnstr(y + i, bar_col, barbuf, bar_w);
-        if (g_decorative) attroff(COLOR_PAIR(2));
 
         // type
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
@@ -2082,6 +2085,7 @@ static void show_help(void) {
         "  s - toggle sort order (asc/desc)",
         "  I - size display: numeric → percent → off",
         "  i - info column (mtime → owner+perm → hidden)",
+        "  TAB / Ctrl-i - toggle graph bar",
         "  q - quit",
         "  h - this help",
         "",
@@ -3550,6 +3554,8 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             // cycle info column (mtime -> owner+perm -> hidden -> mtime)
             g_info_col_mode = (g_info_col_mode == INFOCOL_MTIME) ? INFOCOL_OWNER_PERM : (g_info_col_mode == INFOCOL_OWNER_PERM ? INFOCOL_HIDDEN : INFOCOL_MTIME);
             // redraw on next loop
+        } else if (ch == '\t' || ch == 9) {
+            g_show_graph = !g_show_graph;
         } else if (ch == 'I') {
             // cycle left size column display: numeric -> percentage -> off -> numeric
             g_display_mode = (g_display_mode == DISP_NUM) ? DISP_PCT : (g_display_mode == DISP_PCT ? DISP_OFF : DISP_NUM);
