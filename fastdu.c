@@ -83,11 +83,11 @@ static void print_cli_usage(void) {
     printf("  -R, --reload         Ignore cache and perform full rescan\n");
     printf("  -H, --headless       Force headless (non-TUI) mode\n");
     printf("  -ac, --accuracy      Accurate disk usage: force deep rescan and use allocated blocks (slower)\n");
-    printf("  -x, --one-file-system Stay on remote file system (do not cross mount points)\n");
+    printf("  -x, --one-file-system Stay on the same file system (do not cross mount points)\n");
     printf("  -e PAT, --exclude PAT Exclude files/dirs matching exact PAT\n");
     printf("  --export FMT FILE    Export results to FILE in FMT (json|csv) and exit\n");
     printf("  -D, --decorative     Decorative UI (column headers, vertical separator, extra colors)\n");
-    printf("  -j N, --jobs N       Number of worker threads (default: CPUs)\n\n");
+    printf("  -j N, --jobs N       Number of worker threads (default: CPUs, max 64)\n\n");
     printf("Examples:\n");
     printf("  fastdu                 # open TUI on current directory\n");
     printf("  fastdu -R /data        # full reload of /data, then open TUI\n");
@@ -2066,35 +2066,27 @@ static void show_help(void) {
         "Actions:",
         "  v - preview selected text file (scrollable layer)",
         "  E - extension distribution view (current directory)",
+        "  O - open selected item with system default (xdg-open)",
         "  r - rescan selected dir",
-        "  R - rescan current dir",
+        "  R - rescan current dir (parallel)",
         "  f - find by name (case-insensitive), n/N next/prev",
         "  F - regex search (case-insensitive), enables query filter",
         "  t - toggle type filter (all/dirs/files)",
         "  T - toggle filter by query",
         "  SPACE - mark/unmark file/dir",
-"  Ctrl-A - select/deselect all in view",
+        "  Ctrl-A - select/deselect all in view",
         "  m - move marked to current directory",
         "  c - copy marked to current directory (with progress)",
         "  d - delete marked (if any) else delete selected",
-        "  O - open selected item with system default (xdg-open)",
         "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
-"  I - size display: numeric → percent → off",
-"  i - info column (mtime → owner+perm → hidden)",
+        "  I - size display: numeric → percent → off",
+        "  i - info column (mtime → owner+perm → hidden)",
         "  q - quit",
         "  h - this help",
         "",
-        "Regex guide:",
-        "  - Matching applies to the entry name only (not the full path)",
-        "  - Use 'F' to enter a regex; 'T' toggles the filter on/off",
-        "  Examples:",
-        "    • TXT files:       \\\.txt$",
-        "    • Only directories 'src' or 'docs':  ^(src|docs)$  then press 't' to 'dirs'",
-        "    • Names containing '2024-':          2024-",
-        "",
         "CLI:",
-        "  fastdu [-R|--reload] [-j N|--jobs N] [path]",
+        "  fastdu [-R] [-x] [-e PAT] [-j N] [--export FMT FILE] [path]",
         NULL
     };
 
