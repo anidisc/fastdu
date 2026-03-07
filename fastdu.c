@@ -1860,11 +1860,21 @@ static void draw_list(const DirView *dv, int top) {
         // space after type only if non-decorative (in decorative mode, we place a vertical line)
         if (!g_decorative) mvaddch(y + i, type_col + 1, ' ');
         // name uses remaining space up to right column - 1 (or full width if hidden)
-        if (ve->is_dir) attron(COLOR_PAIR(3)); else attron(COLOR_PAIR(4));
+        if (is_sel) {
+            if (ve->is_dir) attron(A_BOLD);
+        } else {
+            if (ve->is_dir) attron(COLOR_PAIR(3) | A_BOLD);
+            else attron(COLOR_PAIR(4));
+        }
         int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - 1) : (info_col - name_col - 1);
         if (name_max < 0) name_max = 0;
         draw_truncated_name(y + i, name_col, ve->name, name_max);
-        if (ve->is_dir) attroff(COLOR_PAIR(3)); else attroff(COLOR_PAIR(4));
+        if (is_sel) {
+            if (ve->is_dir) attroff(A_BOLD);
+        } else {
+            if (ve->is_dir) attroff(COLOR_PAIR(3) | A_BOLD);
+            else attroff(COLOR_PAIR(4));
+        }
         // left vertical separator between type and name (after drawing type and name)
         if (g_decorative) {
             attron(COLOR_PAIR(2));
@@ -3130,8 +3140,8 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     #endif
             init_pair(1, COLOR_BLACK, COLOR_CYAN);   // header/footer
             init_pair(2, COLOR_CYAN, -1);            // separators / accents
-            init_pair(3, COLOR_CYAN, COLOR_BLACK);   // dirs (names)
-            init_pair(4, COLOR_WHITE, COLOR_BLACK);  // files (names)
+            init_pair(3, COLOR_CYAN, -1);            // dirs (names)
+            init_pair(4, COLOR_WHITE, -1);           // files (names)
             init_pair(5, COLOR_GREEN, -1);           // size small
             init_pair(6, COLOR_YELLOW, -1);          // size medium
             init_pair(7, COLOR_RED, -1);             // size large
