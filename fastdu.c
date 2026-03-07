@@ -1782,13 +1782,21 @@ static void draw_list(const DirView *dv, int top) {
     for (int i = 0; i < list_rows; i++) {
         int idx = top + i;
         int is_sel = ((size_t)idx == dv->selected);
-        if (is_sel) attron(A_REVERSE | A_BOLD);
-        mvhline(y + i, 0, ' ', cols);
+        
         if ((size_t)idx >= dv->n) {
+            if (is_sel) attron(A_REVERSE | A_BOLD);
+            mvhline(y + i, 0, ' ', cols);
             if (is_sel) attroff(A_REVERSE | A_BOLD);
             continue;
         }
+
         const ViewEntry *ve = &dv->v[idx];
+        int base_pair = ve->is_dir ? 3 : 4;
+        
+        attron(COLOR_PAIR(base_pair));
+        if (is_sel) attron(A_REVERSE | A_BOLD);
+        
+        mvhline(y + i, 0, ' ', cols);
         // left size/percent column
         char sizebuf[64] = "";
         if (sizew > 0) {
@@ -1850,9 +1858,9 @@ static void draw_list(const DirView *dv, int top) {
             for (int k = 0; k < 10; k++) barbuf[k+1] = (k < filled) ? '#' : ' ';
             barbuf[11] = ']';
             barbuf[12] = '\0';
-            if (g_decorative) attron(COLOR_PAIR(2));
+            if (g_decorative && !is_sel) attron(COLOR_PAIR(2));
             mvaddnstr(y + i, bar_col, barbuf, bar_w);
-            if (g_decorative) attroff(COLOR_PAIR(2));
+            if (g_decorative && !is_sel) attroff(COLOR_PAIR(2));
         }
 
         // type
@@ -1860,32 +1868,22 @@ static void draw_list(const DirView *dv, int top) {
         // space after type only if non-decorative (in decorative mode, we place a vertical line)
         if (!g_decorative) mvaddch(y + i, type_col + 1, ' ');
         // name uses remaining space up to right column - 1 (or full width if hidden)
-        if (is_sel) {
-            if (ve->is_dir) attron(A_BOLD);
-        } else {
-            if (ve->is_dir) attron(COLOR_PAIR(3) | A_BOLD);
-            else attron(COLOR_PAIR(4));
-        }
+        if (ve->is_dir) attron(A_BOLD);
         int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - 1) : (info_col - name_col - 1);
         if (name_max < 0) name_max = 0;
         draw_truncated_name(y + i, name_col, ve->name, name_max);
-        if (is_sel) {
-            if (ve->is_dir) attroff(A_BOLD);
-        } else {
-            if (ve->is_dir) attroff(COLOR_PAIR(3) | A_BOLD);
-            else attroff(COLOR_PAIR(4));
-        }
+        if (ve->is_dir) attroff(A_BOLD);
         // left vertical separator between type and name (after drawing type and name)
         if (g_decorative) {
-            attron(COLOR_PAIR(2));
+            if (!is_sel) attron(COLOR_PAIR(2));
             if (name_col - 1 >= 0 && name_col - 1 < cols) mvaddch(y + i, name_col - 1, ACS_VLINE);
-            attroff(COLOR_PAIR(2));
+            if (!is_sel) attroff(COLOR_PAIR(2));
         }
         // draw vertical separator between left and right
         if (g_decorative && info_w > 0) {
-            attron(COLOR_PAIR(2));
+            if (!is_sel) attron(COLOR_PAIR(2));
             mvaddch(y + i, info_col - 1, ACS_VLINE);
-            attroff(COLOR_PAIR(2));
+            if (!is_sel) attroff(COLOR_PAIR(2));
         }
         // right info column content (mtime / owner+perm)
         if (info_w > 0) {
@@ -1904,6 +1902,7 @@ static void draw_list(const DirView *dv, int top) {
             }
         }
         if (is_sel) attroff(A_REVERSE | A_BOLD);
+        attroff(COLOR_PAIR(base_pair));
     }
 }
 
