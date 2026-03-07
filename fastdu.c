@@ -66,9 +66,12 @@
 
 // Forward declaration for TUI active flag used before its definition
 static volatile sig_atomic_t g_tui_active;
+static volatile sig_atomic_t g_interrupted = 0;
+
+static void draw_status(const char *msg);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.34.2"
+#define FASTDU_VERSION "0.40.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -80,6 +83,9 @@ static void print_cli_usage(void) {
     printf("  -R, --reload         Ignore cache and perform full rescan\n");
     printf("  -H, --headless       Force headless (non-TUI) mode\n");
     printf("  -ac, --accuracy      Accurate disk usage: force deep rescan and use allocated blocks (slower)\n");
+    printf("  -x, --one-file-system Stay on remote file system (do not cross mount points)\n");
+    printf("  -e PAT, --exclude PAT Exclude files/dirs matching exact PAT\n");
+    printf("  --export FMT FILE    Export results to FILE in FMT (json|csv) and exit\n");
     printf("  -D, --decorative     Decorative UI (column headers, vertical separator, extra colors)\n");
     printf("  -j N, --jobs N       Number of worker threads (default: CPUs)\n\n");
     printf("Examples:\n");
@@ -106,6 +112,8 @@ static void print_cli_usage(void) {
 static int g_headless = 0;
 static int g_accuracy_mode = 0; // when set, compute disk usage using st_blocks and force deep rescan
 static int g_decorative = 0;    // decorative UI: separators, header bar, extra colors
+static int g_one_file_system = 0;
+static dev_t g_root_dev = 0;
 
 static char *xstrdup(const char *s) {
     if (!s) return NULL;
@@ -154,6 +162,117 @@ static void human_size(unsigned long long v, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%llu %s", (unsigned long long)v, units[i]);
     else
         snprintf(buf, bufsz, "%.1f %s", d, units[i]);
+}
+
+// ------------------------------
+// InodeSet (Hard link detection)
+// ------------------------------
+typedef struct InodeEntry {
+    dev_t dev;
+    ino_t ino;
+    struct InodeEntry *next;
+} InodeEntry;
+
+typedef struct {
+    InodeEntry **buckets;
+    size_t num_buckets;
+    pthread_mutex_t mu;
+} InodeSet;
+
+static void inodeset_init(InodeSet *s, size_t buckets) {
+    s->num_buckets = buckets;
+    s->buckets = calloc(buckets, sizeof(InodeEntry*));
+    pthread_mutex_init(&s->mu, NULL);
+}
+
+static int inodeset_check_and_add(InodeSet *s, dev_t dev, ino_t ino) {
+    if (!s || !s->buckets) return 0;
+    // Simple hash for dev/ino
+    size_t h = (((size_t)dev) ^ ((size_t)ino)) % s->num_buckets;
+    pthread_mutex_lock(&s->mu);
+    InodeEntry *curr = s->buckets[h];
+    while (curr) {
+        if (curr->dev == dev && curr->ino == ino) {
+            pthread_mutex_unlock(&s->mu);
+            return 1; // Already seen
+        }
+        curr = curr->next;
+    }
+    InodeEntry *new_e = malloc(sizeof(InodeEntry));
+    if (!new_e) { pthread_mutex_unlock(&s->mu); return 0; }
+    new_e->dev = dev;
+    new_e->ino = ino;
+    new_e->next = s->buckets[h];
+    s->buckets[h] = new_e;
+    pthread_mutex_unlock(&s->mu);
+    return 0; // New
+}
+
+static void inodeset_free(InodeSet *s) {
+    if (!s || !s->buckets) return;
+    for (size_t i = 0; i < s->num_buckets; i++) {
+        InodeEntry *curr = s->buckets[i];
+        while (curr) {
+            InodeEntry *tmp = curr;
+            curr = curr->next;
+            free(tmp);
+        }
+    }
+    free(s->buckets);
+    pthread_mutex_destroy(&s->mu);
+}
+
+// ------------------------------
+// Exclude system
+// ------------------------------
+typedef struct {
+    char **patterns;
+    size_t n;
+    size_t cap;
+} ExcludeList;
+
+static ExcludeList g_excludes = {NULL, 0, 0};
+
+static void exclude_add(const char *p) {
+    if (g_excludes.n == g_excludes.cap) {
+        size_t nc = g_excludes.cap ? g_excludes.cap * 2 : 8;
+        char **np = realloc(g_excludes.patterns, nc * sizeof(char*));
+        if (!np) return;
+        g_excludes.patterns = np;
+        g_excludes.cap = nc;
+    }
+    g_excludes.patterns[g_excludes.n++] = xstrdup(p);
+}
+
+static int is_excluded(const char *name) {
+    for (size_t i = 0; i < g_excludes.n; i++) {
+        // For now, simple exact match or suffix match for common cases like node_modules
+        if (strcmp(name, g_excludes.patterns[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static void exclude_free(void) {
+    for (size_t i = 0; i < g_excludes.n; i++) free(g_excludes.patterns[i]);
+    free(g_excludes.patterns);
+    g_excludes.patterns = NULL; g_excludes.n = g_excludes.cap = 0;
+}
+
+static void load_fastduignore(const char *root) {
+    char *p = path_join(root, ".fastduignore");
+    if (!p) return;
+    FILE *f = fopen(p, "r");
+    free(p);
+    if (!f) return;
+    char *line = NULL; size_t len = 0; ssize_t r;
+    while ((r = getline(&line, &len, f)) != -1) {
+        if (r > 0 && line[r-1] == '\n') line[--r] = '\0';
+        if (r > 0 && line[r-1] == '\r') line[--r] = '\0';
+        if (r == 0 || line[0] == '#') continue;
+        exclude_add(line);
+    }
+    free(line);
+    fclose(f);
 }
 
 static inline unsigned long long file_size_bytes(const struct stat *st) {
@@ -222,7 +341,6 @@ static char *gen_nonconflicting_path(const char *dst) {
     // split extension
     const char *dot = strrchr(base, '.');
     size_t name_len = dot ? (size_t)(dot - base) : strlen(base);
-    size_t ext_len = dot ? strlen(dot) : 0;
     char namebuf[PATH_MAX];
     if (name_len >= sizeof(namebuf)) name_len = sizeof(namebuf)-1;
     memcpy(namebuf, base, name_len); namebuf[name_len] = '\0';
@@ -349,89 +467,75 @@ typedef struct {
     time_t dir_mtime; // mtime of directory at scan time
 } CacheEntry;
 
+#define CACHE_SHARDS 64
+
 typedef struct {
     CacheEntry *v;
     size_t n;
     size_t cap;
     pthread_mutex_t mu;
+} CacheShard;
+
+typedef struct {
+    CacheShard shards[CACHE_SHARDS];
 } Cache;
 
-static void cache_init(Cache *c) { c->v = NULL; c->n = c->cap = 0; pthread_mutex_init(&c->mu, NULL); }
+static size_t cache_hash(const char *s) {
+    size_t h = 5381;
+    int c;
+    while ((c = *s++)) h = ((h << 5) + h) + (size_t)c;
+    return h % CACHE_SHARDS;
+}
+
+static void cache_init(Cache *c) {
+    for (int i = 0; i < CACHE_SHARDS; i++) {
+        c->shards[i].v = NULL;
+        c->shards[i].n = c->shards[i].cap = 0;
+        pthread_mutex_init(&c->shards[i].mu, NULL);
+    }
+}
 
 static void cache_free(Cache *c) {
-    pthread_mutex_lock(&c->mu);
-    for (size_t i = 0; i < c->n; i++) {
-        free(c->v[i].abs_path);
-        free(c->v[i].rel_path);
+    for (int i = 0; i < CACHE_SHARDS; i++) {
+        pthread_mutex_lock(&c->shards[i].mu);
+        for (size_t j = 0; j < c->shards[i].n; j++) {
+            free(c->shards[i].v[j].abs_path);
+            free(c->shards[i].v[j].rel_path);
+        }
+        free(c->shards[i].v);
+        c->shards[i].v = NULL; c->shards[i].n = c->shards[i].cap = 0;
+        pthread_mutex_unlock(&c->shards[i].mu);
+        pthread_mutex_destroy(&c->shards[i].mu);
     }
-    free(c->v);
-    c->v = NULL; c->n = c->cap = 0;
-    pthread_mutex_unlock(&c->mu);
-    pthread_mutex_destroy(&c->mu);
 }
 
-static ssize_t cache_find_index_nl(Cache *c, const char *abs_path) {
-    for (size_t i = 0; i < c->n; i++) {
-        if (strcmp(c->v[i].abs_path, abs_path) == 0) return (ssize_t)i;
+static ssize_t cache_find_index_nl(CacheShard *s, const char *abs_path) {
+    for (size_t i = 0; i < s->n; i++) {
+        if (strcmp(s->v[i].abs_path, abs_path) == 0) return (ssize_t)i;
     }
     return -1;
-}
-
-static CacheEntry *cache_get(Cache *c, const char *abs_path) {
-    CacheEntry *ret = NULL;
-    pthread_mutex_lock(&c->mu);
-    ssize_t idx = cache_find_index_nl(c, abs_path);
-    if (idx >= 0) ret = &c->v[idx];
-    pthread_mutex_unlock(&c->mu);
-    return ret;
-}
-
-static CacheEntry *cache_upsert(Cache *c, const char *root, const char *abs_path, unsigned long long size, time_t now) {
-    CacheEntry *out = NULL;
-    pthread_mutex_lock(&c->mu);
-    ssize_t idx = cache_find_index_nl(c, abs_path);
-    if (idx >= 0) {
-        c->v[idx].size = size;
-        c->v[idx].last_scan = now;
-        out = &c->v[idx];
-    } else {
-        if (c->n == c->cap) {
-            size_t newcap = c->cap ? c->cap * 2 : 256;
-            void *nv = realloc(c->v, newcap * sizeof(CacheEntry));
-            if (!nv) { pthread_mutex_unlock(&c->mu); return NULL; }
-            c->v = (CacheEntry*)nv; c->cap = newcap;
-        }
-        CacheEntry *e = &c->v[c->n++];
-        e->abs_path = xstrdup(abs_path);
-        e->rel_path = relpath_from_abs(root, abs_path);
-        e->size = size;
-        e->last_scan = now;
-        e->ino = 0ULL;
-        e->dir_mtime = 0;
-        out = e;
-    }
-    pthread_mutex_unlock(&c->mu);
-    return out;
 }
 
 static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_path,
                                    unsigned long long size, time_t now,
                                    unsigned long long ino, time_t dir_mtime) {
-    pthread_mutex_lock(&c->mu);
-    ssize_t idx = cache_find_index_nl(c, abs_path);
+    size_t h = cache_hash(abs_path);
+    CacheShard *s = &c->shards[h];
+    pthread_mutex_lock(&s->mu);
+    ssize_t idx = cache_find_index_nl(s, abs_path);
     if (idx >= 0) {
-        c->v[idx].size = size;
-        c->v[idx].last_scan = now;
-        c->v[idx].ino = ino;
-        c->v[idx].dir_mtime = dir_mtime;
+        s->v[idx].size = size;
+        s->v[idx].last_scan = now;
+        s->v[idx].ino = ino;
+        s->v[idx].dir_mtime = dir_mtime;
     } else {
-        if (c->n == c->cap) {
-            size_t newcap = c->cap ? c->cap * 2 : 256;
-            void *nv = realloc(c->v, newcap * sizeof(CacheEntry));
-            if (!nv) { pthread_mutex_unlock(&c->mu); return; }
-            c->v = (CacheEntry*)nv; c->cap = newcap;
+        if (s->n == s->cap) {
+            size_t newcap = s->cap ? s->cap * 2 : 16;
+            void *nv = realloc(s->v, newcap * sizeof(CacheEntry));
+            if (!nv) { pthread_mutex_unlock(&s->mu); return; }
+            s->v = (CacheEntry*)nv; s->cap = newcap;
         }
-        CacheEntry *e = &c->v[c->n++];
+        CacheEntry *e = &s->v[s->n++];
         e->abs_path = xstrdup(abs_path);
         e->rel_path = relpath_from_abs(root, abs_path);
         e->size = size;
@@ -439,7 +543,48 @@ static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_p
         e->ino = ino;
         e->dir_mtime = dir_mtime;
     }
-    pthread_mutex_unlock(&c->mu);
+    pthread_mutex_unlock(&s->mu);
+}
+
+// Helper for single value retrieval to avoid returning pointers to unstable memory
+static int cache_get_info(Cache *c, const char *abs_path, unsigned long long *size, time_t *mtime, unsigned long long *ino) {
+    size_t h = cache_hash(abs_path);
+    CacheShard *s = &c->shards[h];
+    int found = 0;
+    pthread_mutex_lock(&s->mu);
+    ssize_t idx = cache_find_index_nl(s, abs_path);
+    if (idx >= 0) {
+        if (size) *size = s->v[idx].size;
+        if (mtime) *mtime = s->v[idx].dir_mtime;
+        if (ino) *ino = s->v[idx].ino;
+        found = 1;
+    }
+    pthread_mutex_unlock(&s->mu);
+    return found;
+}
+
+static CacheEntry *cache_upsert(Cache *c, const char *root, const char *abs_path, unsigned long long size, time_t now) {
+    cache_upsert_with_meta(c, root, abs_path, size, now, 0ULL, 0);
+    return NULL; // Return NULL as we don't want to expose unstable pointers
+}
+
+static void cache_update_size(Cache *c, const char *abs_path, long long delta, time_t mtime) {
+    size_t h = cache_hash(abs_path);
+    CacheShard *s = &c->shards[h];
+    pthread_mutex_lock(&s->mu);
+    ssize_t idx = cache_find_index_nl(s, abs_path);
+    if (idx >= 0) {
+        if (delta >= 0) {
+            s->v[idx].size += (unsigned long long)delta;
+        } else {
+            unsigned long long abs_delta = (unsigned long long)(-delta);
+            if (s->v[idx].size > abs_delta) s->v[idx].size -= abs_delta;
+            else s->v[idx].size = 0ULL;
+        }
+        s->v[idx].last_scan = time(NULL);
+        if (mtime != 0) s->v[idx].dir_mtime = mtime;
+    }
+    pthread_mutex_unlock(&s->mu);
 }
 
 /*
@@ -457,29 +602,105 @@ static int cache_save(const char *root, const Cache *c) {
     fprintf(f, "root\t%s\n", root);
     // totals: write root total bytes and global files if available
     unsigned long long total_bytes = 0ULL;
-    pthread_mutex_lock((pthread_mutex_t*)&c->mu);
-    for (size_t i = 0; i < c->n; i++) {
-        if (c->v[i].abs_path && strcmp(c->v[i].abs_path, root) == 0) { total_bytes = c->v[i].size; break; }
-    }
-    pthread_mutex_unlock((pthread_mutex_t*)&c->mu);
+    cache_get_info((Cache*)c, root, &total_bytes, NULL, NULL);
     fprintf(f, "totals\t%llu\n", (unsigned long long)total_bytes);
     fprintf(f, "totals_files\t%llu\n", (unsigned long long)g_last_files);
-    pthread_mutex_lock((pthread_mutex_t*)&c->mu);
-    for (size_t i = 0; i < c->n; i++) {
-        char *enc = pct_encode(c->v[i].rel_path ? c->v[i].rel_path : ".");
-        if (!enc) { pthread_mutex_unlock((pthread_mutex_t*)&c->mu); fclose(f); free(cache_path); return -1; }
-        fprintf(f, "D\t%s\t%llu\t%ld\t%llu\t%ld\n",
-                enc,
-                (unsigned long long)c->v[i].size,
-                (long)c->v[i].last_scan,
-                (unsigned long long)c->v[i].ino,
-                (long)c->v[i].dir_mtime);
-        free(enc);
+    for (int i = 0; i < CACHE_SHARDS; i++) {
+        pthread_mutex_lock((pthread_mutex_t*)&c->shards[i].mu);
+        for (size_t j = 0; j < c->shards[i].n; j++) {
+            char *enc = pct_encode(c->shards[i].v[j].rel_path ? c->shards[i].v[j].rel_path : ".");
+            if (!enc) continue;
+            fprintf(f, "D\t%s\t%llu\t%ld\t%llu\t%ld\n",
+                    enc,
+                    (unsigned long long)c->shards[i].v[j].size,
+                    (long)c->shards[i].v[j].last_scan,
+                    (unsigned long long)c->shards[i].v[j].ino,
+                    (long)c->shards[i].v[j].dir_mtime);
+            free(enc);
+        }
+        pthread_mutex_unlock((pthread_mutex_t*)&c->shards[i].mu);
     }
-    pthread_mutex_unlock((pthread_mutex_t*)&c->mu);
     fclose(f);
     free(cache_path);
     return 0;
+}
+
+static void cache_export_json(const Cache *c, const char *filename) {
+    FILE *f = fopen(filename, "w");
+    if (!f) { perror("fopen export"); return; }
+    fprintf(f, "[\n");
+    int first = 1;
+    for (int h = 0; h < CACHE_SHARDS; h++) {
+        pthread_mutex_lock((pthread_mutex_t*)&c->shards[h].mu);
+        for (size_t i = 0; i < c->shards[h].n; i++) {
+            if (!first) fprintf(f, ",\n");
+            first = 0;
+            fprintf(f, "  {\n");
+            fprintf(f, "    \"path\": \"");
+            for (const char *p = c->shards[h].v[i].abs_path; *p; p++) {
+                if (*p == '"' || *p == '\\') fputc('\\', f);
+                fputc(*p, f);
+            }
+            fprintf(f, "\",\n");
+            fprintf(f, "    \"size\": %llu,\n", c->shards[h].v[i].size);
+            fprintf(f, "    \"last_scan\": %ld,\n", (long)c->shards[h].v[i].last_scan);
+            fprintf(f, "    \"ino\": %llu,\n", c->shards[h].v[i].ino);
+            fprintf(f, "    \"mtime\": %ld\n", (long)c->shards[h].v[i].dir_mtime);
+            fprintf(f, "  }");
+        }
+        pthread_mutex_unlock((pthread_mutex_t*)&c->shards[h].mu);
+    }
+    fprintf(f, "\n]\n");
+    fclose(f);
+}
+
+static void cache_export_csv(const Cache *c, const char *filename) {
+    FILE *f = fopen(filename, "w");
+    if (!f) { perror("fopen export"); return; }
+    fprintf(f, "path,size,last_scan,ino,mtime\n");
+    for (int h = 0; h < CACHE_SHARDS; h++) {
+        pthread_mutex_lock((pthread_mutex_t*)&c->shards[h].mu);
+        for (size_t i = 0; i < c->shards[h].n; i++) {
+            // Simple CSV escaping: wrap in quotes and escape quotes
+            fprintf(f, "\"");
+            for (const char *p = c->shards[h].v[i].abs_path; *p; p++) {
+                if (*p == '"') fprintf(f, "\"\"");
+                else fputc(*p, f);
+            }
+            fprintf(f, "\",%llu,%ld,%llu,%ld\n",
+                    c->shards[h].v[i].size,
+                    (long)c->shards[h].v[i].last_scan,
+                    c->shards[h].v[i].ino,
+                    (long)c->shards[h].v[i].dir_mtime);
+        }
+        pthread_mutex_unlock((pthread_mutex_t*)&c->shards[h].mu);
+    }
+    fclose(f);
+}
+
+static void draw_cache_progress(const char *cache_path, FILE *f, long total_bytes, int *spinner, struct timespec *last_draw) {
+    if (!g_tui_active) return;
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (now.tv_sec - last_draw->tv_sec) * 1000 + (now.tv_nsec - last_draw->tv_nsec) / 1000000;
+    if (ms < 30) return;
+    *last_draw = now;
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
+    char bar[256]; memset(bar, '.', (size_t)barlen);
+    int filled = 0; int percent = 0;
+    if (total_bytes > 0) {
+        long cur = ftell(f); if (cur < 0) cur = 0;
+        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+        filled = (int)(frac * barlen);
+        percent = (int)(frac * 100.0 + 0.5);
+    } else { *spinner = (*spinner + 1) % barlen; filled = *spinner; }
+    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
+    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
+    char linebuf[PATH_MAX + 256];
+    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
+    mvhline(rows-1, 0, ' ', cols);
+    mvaddnstr(rows-1, 0, linebuf, cols-1);
+    refresh();
 }
 
 /*
@@ -503,159 +724,65 @@ static int cache_load(const char *root, Cache *c) {
         if (pos > 0) total_bytes = pos;
         fseek(f, 0, SEEK_SET);
     }
-    int ui_enabled = (g_tui_active ? 1 : 0);
     struct timespec last_draw; clock_gettime(CLOCK_MONOTONIC, &last_draw);
     int spinner = 0;
 
     char *line = NULL; size_t len = 0; ssize_t r;
     int header_ok = 0; int version = 1;
-    unsigned long long totals_bytes = 0ULL;
     unsigned long long totals_files = 0ULL;
     unsigned long long lines_read = 0ULL;
     while ((r = getline(&line, &len, f)) != -1) {
+        if (g_interrupted) break;
         if (r > 0 && (line[r-1] == '\n' || line[r-1] == '\r')) line[--r] = '\0';
         if (!header_ok) {
             if (strncmp(line, "# fastdu-cache v3", 18) == 0) { header_ok = 1; version = 3; }
             else if (strncmp(line, "# fastdu-cache v2", 18) == 0) { header_ok = 1; version = 2; }
             else if (strncmp(line, "# fastdu-cache v1", 18) == 0) { header_ok = 1; version = 1; }
-            // update progress
-            if (ui_enabled) {
-                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-                long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
-                if (ms >= 30) {
-                    last_draw = now;
-                    int cols, rows; getmaxyx(stdscr, rows, cols);
-                    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
-                    char bar[256]; memset(bar, '.', (size_t)barlen);
-                    int filled = 0; int percent = 0;
-                    if (total_bytes > 0) {
-                        long cur = ftell(f);
-                        if (cur < 0) cur = 0;
-                        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
-                        filled = (int)(frac * barlen);
-                        percent = (int)(frac * 100.0 + 0.5);
-                    } else {
-                        spinner = (spinner + 1) % barlen; filled = spinner;
-                        percent = 0;
-                    }
-                    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
-                    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
-                    char linebuf[PATH_MAX + 256];
-                    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
-                    mvhline(rows-1, 0, ' ', cols);
-                    mvaddnstr(rows-1, 0, linebuf, cols-1);
-                    refresh();
-                }
-            }
+            draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
             continue;
         }
         if (strncmp(line, "root\t", 5) == 0) {
-            // informational, ignore value
-            if (ui_enabled) {
-                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-                long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
-                if (ms >= 30) {
-                    last_draw = now;
-                    int cols, rows; getmaxyx(stdscr, rows, cols);
-                    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
-                    char bar[256]; memset(bar, '.', (size_t)barlen);
-                    int filled = 0; int percent = 0;
-                    if (total_bytes > 0) {
-                        long cur = ftell(f); if (cur < 0) cur = 0;
-                        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
-                        filled = (int)(frac * barlen);
-                        percent = (int)(frac * 100.0 + 0.5);
-                    } else { spinner = (spinner + 1) % barlen; filled = spinner; }
-                    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
-                    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
-                    char linebuf[PATH_MAX + 256];
-                    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
-                    mvhline(rows-1, 0, ' ', cols);
-                    mvaddnstr(rows-1, 0, linebuf, cols-1);
-                    refresh();
-                }
-            }
+            draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
             continue;
         }
         if (version >= 3 && strncmp(line, "totals\t", 8) == 0) {
-            const char *b = line + 8;
-            unsigned long long v = 0ULL; sscanf(b, "%llu", &v);
-            totals_bytes = v;
-            if (ui_enabled) {
-                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-                long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
-                if (ms >= 30) {
-                    last_draw = now;
-                    int cols, rows; getmaxyx(stdscr, rows, cols);
-                    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
-                    char bar[256]; memset(bar, '.', (size_t)barlen);
-                    int filled = 0; int percent = 0;
-                    if (total_bytes > 0) {
-                        long cur = ftell(f); if (cur < 0) cur = 0;
-                        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
-                        filled = (int)(frac * barlen);
-                        percent = (int)(frac * 100.0 + 0.5);
-                    } else { spinner = (spinner + 1) % barlen; filled = spinner; }
-                    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
-                    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
-                    char linebuf[PATH_MAX + 256];
-                    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
-                    mvhline(rows-1, 0, ' ', cols);
-                    mvaddnstr(rows-1, 0, linebuf, cols-1);
-                    refresh();
-                }
-            }
+            draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
             continue;
         }
         if (version >= 3 && strncmp(line, "totals_files\t", 14) == 0) {
             const char *b = line + 14;
             unsigned long long v = 0ULL; sscanf(b, "%llu", &v);
             totals_files = v;
-            if (ui_enabled) {
-                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-                long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
-                if (ms >= 30) {
-                    last_draw = now;
-                    int cols, rows; getmaxyx(stdscr, rows, cols);
-                    int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
-                    char bar[256]; memset(bar, '.', (size_t)barlen);
-                    int filled = 0; int percent = 0;
-                    if (total_bytes > 0) {
-                        long cur = ftell(f); if (cur < 0) cur = 0;
-                        double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
-                        filled = (int)(frac * barlen);
-                        percent = (int)(frac * 100.0 + 0.5);
-                    } else { spinner = (spinner + 1) % barlen; filled = spinner; }
-                    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
-                    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
-                    char linebuf[PATH_MAX + 256];
-                    snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
-                    mvhline(rows-1, 0, ' ', cols);
-                    mvaddnstr(rows-1, 0, linebuf, cols-1);
-                    refresh();
-                }
-            }
+            draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
             continue;
         }
         if (line[0] == 'D' && line[1] == '\t') {
             char *p = line + 2;
             char *rel = p;
-            char *tab1 = strchr(p, '\t'); if (!tab1) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; } *tab1 = '\0';
+            char *tab1 = strchr(p, '\t');
+            if (!tab1) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
+            *tab1 = '\0';
             char *size_str = tab1 + 1;
-            char *tab2 = strchr(size_str, '\t'); if (!tab2) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; } *tab2 = '\0';
+            char *tab2 = strchr(size_str, '\t');
+            if (!tab2) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
+            *tab2 = '\0';
             char *time_str = tab2 + 1;
             char *ino_str = NULL; char *mtime_str = NULL;
             if (version >= 2) {
-                char *tab3 = strchr(time_str, '\t'); if (!tab3) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; } *tab3 = '\0';
+                char *tab3 = strchr(time_str, '\t');
+                if (!tab3) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
+                *tab3 = '\0';
                 ino_str = tab3 + 1;
-                char *tab4 = strchr(ino_str, '\t'); if (!tab4) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; } *tab4 = '\0';
+                char *tab4 = strchr(ino_str, '\t');
+                if (!tab4) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
+                *tab4 = '\0';
                 mtime_str = tab4 + 1;
             }
             char *rel_dec = pct_decode(rel);
-            if (!rel_dec) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; }
+            if (!rel_dec) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
             char *abs = abspath_from_rel(root, rel_dec);
             free(rel_dec);
-            if (!abs) { if (ui_enabled) { struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now); long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000; if (ms >= 30) { last_draw = now; int cols, rows; getmaxyx(stdscr, rows, cols); int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200; char bar[256]; memset(bar, '.', (size_t)barlen); int filled = 0; int percent = 0; if (total_bytes > 0) { long cur = ftell(f); if (cur < 0) cur = 0; double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1; filled = (int)(frac * barlen); percent = (int)(frac * 100.0 + 0.5); } else { spinner = (spinner + 1) % barlen; filled = spinner; } if (filled < 0) filled = 0; if (filled > barlen) filled = barlen; for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0'; char linebuf[PATH_MAX + 256]; snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path); mvhline(rows-1, 0, ' ', cols); mvaddnstr(rows-1, 0, linebuf, cols-1); refresh(); } } continue; }
+            if (!abs) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
             unsigned long long size = 0ULL;
             long last_scan = 0;
             unsigned long long ino = 0ULL; long dir_mtime = 0;
@@ -670,34 +797,11 @@ static int cache_load(const char *root, Cache *c) {
         lines_read++;
         if ((g_headless && (lines_read % 1000ULL == 0ULL)) || (debug_cache && (lines_read % 1000ULL == 0ULL)))
             fprintf(stderr, "[cache] read %llu lines\n", (unsigned long long)lines_read);
-        if (ui_enabled) {
-            struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-            long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
-            if (ms >= 30) {
-                last_draw = now;
-                int cols, rows; getmaxyx(stdscr, rows, cols);
-                int barlen = cols > 40 ? (cols - 40) : 20; if (barlen < 10) barlen = 10; if (barlen > 200) barlen = 200;
-                char bar[256]; memset(bar, '.', (size_t)barlen);
-                int filled = 0; int percent = 0;
-                if (total_bytes > 0) {
-                    long cur = ftell(f); if (cur < 0) cur = 0;
-                    double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
-                    filled = (int)(frac * barlen);
-                    percent = (int)(frac * 100.0 + 0.5);
-                } else { spinner = (spinner + 1) % barlen; filled = spinner; }
-                if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
-                for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
-                char linebuf[PATH_MAX + 256];
-                snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
-                mvhline(rows-1, 0, ' ', cols);
-                mvaddnstr(rows-1, 0, linebuf, cols-1);
-                refresh();
-            }
-        }
+        draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
     }
     if (g_headless || debug_cache) fprintf(stderr, "[cache] done lines=%llu\n", (unsigned long long)lines_read);
     // Clear progress line if UI is active
-    if (ui_enabled) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
+    if (g_tui_active) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
     free(line);
     fclose(f);
     free(cache_path);
@@ -837,7 +941,7 @@ static void draw_progress_ui(ScanUI *ui, const char *current_path) {
  *  - Skips symlinks (AT_SYMLINK_NOFOLLOW, DT_LNK/S_ISLNK checks)
  *  - For subdirectories, recurses and updates the cache
  */
-static unsigned long long scan_dir_recursive_fd(int dirfd, const char *abs_path, const char *root, const char *cache_file_abs, Cache *cache, ScanUI *ui) {
+static unsigned long long scan_dir_recursive_fd(int dirfd, const char *abs_path, const char *root, const char *cache_file_abs, Cache *cache, ScanUI *ui, InodeSet *is) {
     unsigned long long total = 0ULL;
     int dupfd = dup(dirfd);
     if (dupfd < 0) return 0ULL;
@@ -845,7 +949,9 @@ static unsigned long long scan_dir_recursive_fd(int dirfd, const char *abs_path,
     if (!dp) { close(dupfd); return 0ULL; }
     struct dirent *de;
     while ((de = readdir(dp)) != NULL) {
+        if (g_interrupted) break;
         if (is_dot_or_dotdot(de->d_name)) continue;
+        if (is_excluded(de->d_name)) continue;
         if (strcmp(abs_path, root) == 0 && strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
         unsigned char dtype = de->d_type;
         if (dtype == DT_LNK) continue;
@@ -854,16 +960,29 @@ static unsigned long long scan_dir_recursive_fd(int dirfd, const char *abs_path,
                 if (fstatat(dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) != 0) continue;
                 if (S_ISLNK(st0.st_mode)) continue;
                 if (S_ISDIR(st0.st_mode)) dtype = DT_DIR; else if (S_ISREG(st0.st_mode)) dtype = DT_REG; else dtype = DT_UNKNOWN;
-                if (dtype == DT_REG) total += file_size_bytes(&st0);
+                if (dtype == DT_REG) {
+                    if (st0.st_nlink <= 1 || !inodeset_check_and_add(is, st0.st_dev, st0.st_ino))
+                        total += file_size_bytes(&st0);
+                }
             } else if (dtype == DT_REG) {
                 struct stat stf;
-                if (fstatat(dirfd, de->d_name, &stf, AT_SYMLINK_NOFOLLOW) == 0) total += file_size_bytes(&stf);
+                if (fstatat(dirfd, de->d_name, &stf, AT_SYMLINK_NOFOLLOW) == 0) {
+                    if (stf.st_nlink <= 1 || !inodeset_check_and_add(is, stf.st_dev, stf.st_ino))
+                        total += file_size_bytes(&stf);
+                }
             } else if (dtype == DT_DIR) {
             int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (cfd < 0) continue;
+            if (g_one_file_system) {
+                struct stat stch;
+                if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) {
+                    close(cfd);
+                    continue;
+                }
+            }
             char *child_abs = path_join(abs_path, de->d_name);
             if (!child_abs) { close(cfd); continue; }
-            unsigned long long sub = scan_dir_recursive_fd(cfd, child_abs, root, cache_file_abs, cache, ui);
+            unsigned long long sub = scan_dir_recursive_fd(cfd, child_abs, root, cache_file_abs, cache, ui, is);
             struct stat stch;
             if (fstat(cfd, &stch) == 0) {
                 CacheEntry *e = cache_upsert(cache, root, child_abs, sub, time(NULL));
@@ -887,10 +1006,13 @@ static unsigned long long scan_dir_recursive_fd(int dirfd, const char *abs_path,
 }
 
 static unsigned long long scan_dir_recursive(const char *dir, const char *root, const char *cache_file_abs, Cache *cache, ScanUI *ui) {
+    InodeSet is;
+    inodeset_init(&is, 16384);
     int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return 0ULL;
-    unsigned long long total = scan_dir_recursive_fd(fd, dir, root, cache_file_abs, cache, ui);
+    if (fd < 0) { inodeset_free(&is); return 0ULL; }
+    unsigned long long total = scan_dir_recursive_fd(fd, dir, root, cache_file_abs, cache, ui, &is);
     close(fd);
+    inodeset_free(&is);
     return total;
 }
 
@@ -1104,6 +1226,7 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
     if (!dp) return -1;
     struct dirent *de;
     while ((de = readdir(dp)) != NULL) {
+        if (g_interrupted) break;
         if (is_dot_or_dotdot(de->d_name)) continue;
         if (strcmp(de->d_name, CACHE_FILENAME) == 0 && strcmp(path, root) == 0) continue; // hide cache file at root
         char *abs = path_join(path, de->d_name);
@@ -1146,8 +1269,7 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
         // record mtime from stat for both files and directories
         if (dtype == DT_REG || dtype == DT_DIR) ve->mtime = st.st_mtime; else ve->mtime = time(NULL);
         if (ve->is_dir) {
-            CacheEntry *ce = cache_get(cache, ve->abs_path);
-            if (ce) { ve->size = ce->size; ve->size_known = 1; }
+            if (cache_get_info(cache, ve->abs_path, &ve->size, NULL, NULL)) { ve->size_known = 1; }
             else { ve->size = 0ULL; ve->size_known = 0; }
         } else if (dtype == DT_REG) {
             ve->size = file_size_bytes(&st);
@@ -1171,7 +1293,9 @@ static unsigned long long count_dir_files_fd(int dirfd) {
     if (!dp) { close(dupfd); return 0ULL; }
     struct dirent *de;
     while ((de = readdir(dp)) != NULL) {
+        if (g_interrupted) break;
         if (is_dot_or_dotdot(de->d_name)) continue;
+        if (is_excluded(de->d_name)) continue;
         if (strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
         unsigned char dt = de->d_type;
         if (dt == DT_LNK) continue;
@@ -1183,19 +1307,39 @@ static unsigned long long count_dir_files_fd(int dirfd) {
                 if (S_ISREG(st0.st_mode)) count++;
                 else if (S_ISDIR(st0.st_mode)) {
                     int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-                    if (cfd >= 0) { count += count_dir_files_fd(cfd); close(cfd); }
+                    if (cfd >= 0) {
+                        if (g_one_file_system) {
+                            struct stat stch;
+                            if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) {
+                                close(cfd);
+                                continue;
+                            }
+                        }
+                        count += count_dir_files_fd(cfd);
+                        close(cfd);
+                    }
                 }
             }
         } else if (dt == DT_DIR) {
             int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if (cfd >= 0) { count += count_dir_files_fd(cfd); close(cfd); }
+            if (cfd >= 0) {
+                if (g_one_file_system) {
+                    struct stat stch;
+                    if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) {
+                        close(cfd);
+                        continue;
+                    }
+                }
+                count += count_dir_files_fd(cfd);
+                close(cfd);
+            }
         }
     }
     closedir(dp);
     return count;
 }
 
-static unsigned long long sum_dir_sizes_fd(int dirfd) {
+static unsigned long long sum_dir_sizes_fd(int dirfd, InodeSet *is) {
     unsigned long long total = 0ULL;
     int dupfd = dup(dirfd);
     if (dupfd < 0) return 0ULL;
@@ -1203,25 +1347,53 @@ static unsigned long long sum_dir_sizes_fd(int dirfd) {
     if (!dp) { close(dupfd); return 0ULL; }
     struct dirent *de;
     while ((de = readdir(dp)) != NULL) {
+        if (g_interrupted) break;
         if (is_dot_or_dotdot(de->d_name)) continue;
+        if (is_excluded(de->d_name)) continue;
         if (strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
         unsigned char dt = de->d_type;
         if (dt == DT_LNK) continue;
         if (dt == DT_REG) {
             struct stat st;
-            if (fstatat(dirfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) total += file_size_bytes(&st);
+            if (fstatat(dirfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                if (st.st_nlink <= 1 || !inodeset_check_and_add(is, st.st_dev, st.st_ino))
+                    total += file_size_bytes(&st);
+            }
         } else if (dt == DT_UNKNOWN) {
             struct stat st0;
             if (fstatat(dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) == 0) {
-                if (S_ISREG(st0.st_mode)) total += file_size_bytes(&st0);
+                if (S_ISREG(st0.st_mode)) {
+                    if (st0.st_nlink <= 1 || !inodeset_check_and_add(is, st0.st_dev, st0.st_ino))
+                        total += file_size_bytes(&st0);
+                }
                 else if (S_ISDIR(st0.st_mode)) {
                     int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-                    if (cfd >= 0) { total += sum_dir_sizes_fd(cfd); close(cfd); }
+                    if (cfd >= 0) {
+                        if (g_one_file_system) {
+                            struct stat stch;
+                            if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) {
+                                close(cfd);
+                                continue;
+                            }
+                        }
+                        total += sum_dir_sizes_fd(cfd, is);
+                        close(cfd);
+                    }
                 }
             }
         } else if (dt == DT_DIR) {
             int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if (cfd >= 0) { total += sum_dir_sizes_fd(cfd); close(cfd); }
+            if (cfd >= 0) {
+                if (g_one_file_system) {
+                    struct stat stch;
+                    if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) {
+                        close(cfd);
+                        continue;
+                    }
+                }
+                total += sum_dir_sizes_fd(cfd, is);
+                close(cfd);
+            }
         }
     }
     closedir(dp);
@@ -1229,16 +1401,24 @@ static unsigned long long sum_dir_sizes_fd(int dirfd) {
 }
 
 static unsigned long long sum_path_size(const char *path) {
+    InodeSet is;
+    inodeset_init(&is, 1024);
     struct stat st;
-    if (lstat(path, &st) != 0) return 0ULL;
-    if (S_ISREG(st.st_mode)) return file_size_bytes(&st);
-    if (S_ISDIR(st.st_mode)) {
-        int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (fd < 0) return 0ULL;
-        unsigned long long s = sum_dir_sizes_fd(fd);
-        close(fd);
+    if (lstat(path, &st) != 0) { inodeset_free(&is); return 0ULL; }
+    if (S_ISREG(st.st_mode)) {
+        unsigned long long s = file_size_bytes(&st);
+        inodeset_free(&is);
         return s;
     }
+    if (S_ISDIR(st.st_mode)) {
+        int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (fd < 0) { inodeset_free(&is); return 0ULL; }
+        unsigned long long s = sum_dir_sizes_fd(fd, &is);
+        close(fd);
+        inodeset_free(&is);
+        return s;
+    }
+    inodeset_free(&is);
     return 0ULL;
 }
 
@@ -1267,6 +1447,7 @@ static int copy_file_with_progress(const char *src, const char *dst, CopyUI *ui)
     if (!buf) { close(sfd); close(dfd); return -1; }
     ssize_t r;
     while ((r = read(sfd, buf, BUFSZ)) > 0) {
+        if (g_interrupted) break;
         ssize_t off = 0;
         while (off < r) {
             ssize_t w = write(dfd, buf + off, (size_t)(r - off));
@@ -1284,43 +1465,55 @@ static int copy_file_with_progress(const char *src, const char *dst, CopyUI *ui)
     return (r < 0) ? -1 : 0;
 }
 
+typedef struct {
+    char *src;
+    char *dst;
+} CopyTask;
+
 static int copy_tree_with_progress(const char *src, const char *dst, CopyUI *ui, const char *root) {
-    struct stat st;
-    if (lstat(src, &st) != 0) return -1;
-    if (S_ISREG(st.st_mode)) {
-        // ensure parent dir exists assumed
-        return copy_file_with_progress(src, dst, ui);
-    } else if (S_ISDIR(st.st_mode)) {
-        // create dst dir
-        mkdir(dst, st.st_mode & 0777);
-        int sfd = open(src, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (sfd < 0) return -1;
-        DIR *dp = fdopendir(sfd);
-        if (!dp) { close(sfd); return -1; }
-        struct dirent *de;
-        while ((de = readdir(dp)) != NULL) {
-            if (is_dot_or_dotdot(de->d_name)) continue;
-            if (strcmp(de->d_name, CACHE_FILENAME) == 0 && strcmp(src, root) == 0) continue;
-            unsigned char dt = de->d_type;
-            if (dt == DT_LNK) continue;
-            char *child_src = path_join(src, de->d_name);
-            char *child_dst = path_join(dst, de->d_name);
-            if (!child_src || !child_dst) { free(child_src); free(child_dst); closedir(dp); return -1; }
-            int rc;
-            if (dt == DT_DIR || dt == DT_UNKNOWN) {
-                struct stat stc;
-                if (dt == DT_UNKNOWN) { if (lstat(child_src, &stc) != 0) { free(child_src); free(child_dst); continue; } }
-                rc = copy_tree_with_progress(child_src, child_dst, ui, root);
-            } else {
-                rc = copy_file_with_progress(child_src, child_dst, ui);
+    size_t cap = 128, n = 0;
+    CopyTask *list = malloc(cap * sizeof(CopyTask));
+    if (!list) return -1;
+    list[n++] = (CopyTask){xstrdup(src), xstrdup(dst)};
+
+    int final_rc = 0;
+    // Walk and collect subtasks iteratively
+    for (size_t i = 0; i < n; i++) {
+        if (g_interrupted) { final_rc = -1; break; }
+        struct stat st;
+        if (lstat(list[i].src, &st) != 0) { final_rc = -1; continue; }
+        if (S_ISDIR(st.st_mode)) {
+            mkdir(list[i].dst, st.st_mode & 0777);
+            int sfd = open(list[i].src, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (sfd >= 0) {
+                DIR *dp = fdopendir(sfd);
+                if (dp) {
+                    struct dirent *de;
+                    while ((de = readdir(dp)) != NULL) {
+                        if (is_dot_or_dotdot(de->d_name)) continue;
+                        if (strcmp(de->d_name, CACHE_FILENAME) == 0 && strcmp(list[i].src, root) == 0) continue;
+                        if (de->d_type == DT_LNK) continue;
+                        char *cs = path_join(list[i].src, de->d_name);
+                        char *cd = path_join(list[i].dst, de->d_name);
+                        if (cs && cd) {
+                            if (n == cap) { cap *= 2; list = realloc(list, cap * sizeof(CopyTask)); }
+                            list[n++] = (CopyTask){cs, cd};
+                        } else { free(cs); free(cd); }
+                    }
+                    closedir(dp);
+                } else { close(sfd); }
             }
-            free(child_src); free(child_dst);
-            if (rc != 0) { /* continue best-effort */ }
+        } else if (S_ISREG(st.st_mode)) {
+            if (copy_file_with_progress(list[i].src, list[i].dst, ui) != 0) final_rc = -1;
         }
-        closedir(dp);
-        return 0;
     }
-    return -1;
+
+    for (size_t i = 0; i < n; i++) {
+        free(list[i].src);
+        free(list[i].dst);
+    }
+    free(list);
+    return final_rc;
 }
 
 // ------------------------------
@@ -1411,6 +1604,113 @@ static void format_owner_perm(const char *path, char *out, size_t outsz) {
     else snprintf(out, outsz, "%u %04o", (unsigned)st.st_uid, mode_octal);
 }
 
+static void draw_truncated_name(int y, int x, const char *name, int max_w) {
+    if (max_w <= 0) return;
+    int len = (int)strlen(name);
+    if (len <= max_w) {
+        mvaddnstr(y, x, name, max_w);
+    } else {
+        if (max_w <= 3) {
+            for (int i = 0; i < max_w; i++) mvaddch(y, x + i, '.');
+        } else {
+            // End truncation: "verylongna..."
+            char buf[512]; // reasonable stack buffer
+            int take = (max_w - 3 < (int)sizeof(buf) - 4) ? (max_w - 3) : ((int)sizeof(buf) - 4);
+            memcpy(buf, name, (size_t)take);
+            strcpy(buf + take, "...");
+            mvaddnstr(y, x, buf, max_w);
+        }
+    }
+}
+
+typedef struct {
+    char *ext;
+    unsigned long long size;
+    unsigned long long count;
+} ExtEntry;
+
+static int cmp_ext_entries(const void *a, const void *b) {
+    const ExtEntry *ea = (const ExtEntry*)a;
+    const ExtEntry *eb = (const ExtEntry*)b;
+    if (ea->size == eb->size) return 0;
+    return (ea->size < eb->size) ? 1 : -1;
+}
+
+static void show_extension_view(const DirView *dv) {
+    if (dv->n == 0) return;
+    size_t cap = 32, n = 0;
+    ExtEntry *entries = malloc(cap * sizeof(ExtEntry));
+    if (!entries) return;
+
+    for (size_t i = 0; i < dv->n; i++) {
+        if (dv->v[i].is_dir) continue;
+        const char *name = dv->v[i].name;
+        const char *dot = strrchr(name, '.');
+        char *ext = NULL;
+        if (dot && dot != name) ext = xstrdup(dot);
+        else ext = xstrdup("(no ext)");
+
+        int found = 0;
+        for (size_t j = 0; j < n; j++) {
+            if (strcmp(entries[j].ext, ext) == 0) {
+                entries[j].size += dv->v[i].size;
+                entries[j].count++;
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            if (n == cap) {
+                cap *= 2;
+                ExtEntry *ne = realloc(entries, cap * sizeof(ExtEntry));
+                if (ne) entries = ne;
+            }
+            entries[n].ext = ext;
+            entries[n].size = dv->v[i].size;
+            entries[n].count = 1;
+            n++;
+        } else {
+            free(ext);
+        }
+    }
+
+    if (n == 0) { free(entries); draw_status("No files in current view."); return; }
+    qsort(entries, n, sizeof(ExtEntry), cmp_ext_entries);
+
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    int w = cols - 12; if (w < 40) w = cols - 4;
+    int h = rows - 10; if (h < 10) h = rows - 4;
+    int x = (cols - w) / 2; int y = (rows - h) / 2;
+    WINDOW *win = newwin(h, w, y, x);
+    keypad(win, TRUE);
+    unsigned long long tot_size = 0; for (size_t i = 0; i < n; i++) tot_size += entries[i].size;
+
+    int off = 0;
+    for (;;) {
+        werase(win); box(win, 0, 0);
+        wattron(win, A_REVERSE | A_BOLD);
+        mvwaddnstr(win, 0, 2, " Extension Distribution - q to close ", w - 4);
+        wattroff(win, A_REVERSE | A_BOLD);
+        for (int i = 0; i < h - 2; i++) {
+            size_t idx = (size_t)off + (size_t)i;
+            if (idx >= n) break;
+            char sz[32], pc[32];
+            human_size(entries[idx].size, sz, sizeof(sz));
+            double p = (tot_size > 0) ? (double)entries[idx].size * 100.0 / (double)tot_size : 0.0;
+            snprintf(pc, sizeof(pc), "%5.1f%%", p);
+            mvwprintw(win, 1 + i, 2, "%-12s %10s %5s (%llu files)", entries[idx].ext, sz, pc, entries[idx].count);
+        }
+        wrefresh(win);
+        int ch = wgetch(win);
+        if (ch == 'q' || ch == 'Q' || ch == 27) break;
+        if (ch == KEY_UP && off > 0) off--;
+        if (ch == KEY_DOWN && (size_t)off + (size_t)(h-2) < n) off++;
+    }
+    delwin(win);
+    for (size_t i = 0; i < n; i++) free(entries[i].ext);
+    free(entries);
+}
+
 /*
  * draw_list
  * ---------
@@ -1428,7 +1728,9 @@ static void draw_list(const DirView *dv, int top) {
     int mark_col = 0; // mark column at 0
     int size_col = 2; // mark + space
     int type_col = size_col + (sizew > 0 ? (sizew + 1) : 0); // if size hidden, no gap
-    int name_col = type_col + 2; // type char + space
+    int bar_w = 12; // [##########]
+    int bar_col = type_col + 2;
+    int name_col = bar_col + bar_w + 1;
     // Right column anchored to right; width depends only on info mode
     const int info_w_default = 16; // fits date comfortably
     int info_w = (g_info_col_mode == INFOCOL_HIDDEN) ? 0 : info_w_default;
@@ -1455,6 +1757,8 @@ static void draw_list(const DirView *dv, int top) {
         mvaddnstr(1, size_col + spad, size_title, sizew - spad);
         // Type header at exact type_col
         mvaddnstr(1, type_col, "T", cols - type_col);
+        // Bar header
+        mvaddnstr(1, bar_col, "Graph", bar_w);
         // Name header begins at name_col
         int name_width = (info_col - name_col - 2);
         if (name_width > 0) mvaddnstr(1, name_col, "Name", name_width);
@@ -1467,14 +1771,12 @@ static void draw_list(const DirView *dv, int top) {
         attroff(COLOR_PAIR(2));
     }
 
-    // Precompute total size for percentage mode (sum of known sizes in view)
+    // Precompute total size for percentage mode and bars (sum of known sizes in view)
     unsigned long long view_total = 0ULL;
-    if (g_display_mode == DISP_PCT) {
-        for (size_t i = 0; i < dv->n; i++) {
-            if (dv->v[i].size_known) view_total += dv->v[i].size;
-        }
-        if (view_total == 0ULL) view_total = 1ULL; // avoid div-by-zero
+    for (size_t i = 0; i < dv->n; i++) {
+        if (dv->v[i].size_known) view_total += dv->v[i].size;
     }
+    if (view_total == 0ULL) view_total = 1ULL; // avoid div-by-zero
 
     for (int i = 0; i < list_rows; i++) {
         int idx = top + i;
@@ -1534,6 +1836,22 @@ static void draw_list(const DirView *dv, int top) {
             if (name_col - 1 >= 0 && name_col - 1 < cols) mvaddch(y + i, name_col - 1, ACS_VLINE);
             attroff(COLOR_PAIR(2));
         }
+        // graph bar
+        char barbuf[16];
+        barbuf[0] = '[';
+        int filled = 0;
+        if (ve->size_known && view_total > 0) {
+            double frac = (double)ve->size / (double)view_total;
+            filled = (int)(frac * 10.0 + 0.5);
+            if (filled > 10) filled = 10;
+        }
+        for (int k = 0; k < 10; k++) barbuf[k+1] = (k < filled) ? '#' : ' ';
+        barbuf[11] = ']';
+        barbuf[12] = '\0';
+        if (g_decorative) attron(COLOR_PAIR(2));
+        mvaddnstr(y + i, bar_col, barbuf, bar_w);
+        if (g_decorative) attroff(COLOR_PAIR(2));
+
         // type
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
         // space after type only if non-decorative (in decorative mode, we place a vertical line)
@@ -1542,7 +1860,7 @@ static void draw_list(const DirView *dv, int top) {
         if (ve->is_dir) attron(COLOR_PAIR(3)); else attron(COLOR_PAIR(4));
         int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - 1) : (info_col - name_col - 1);
         if (name_max < 0) name_max = 0;
-        mvaddnstr(y + i, name_col, ve->name, name_max);
+        draw_truncated_name(y + i, name_col, ve->name, name_max);
         if (ve->is_dir) attroff(COLOR_PAIR(3)); else attroff(COLOR_PAIR(4));
         // left vertical separator between type and name (after drawing type and name)
         if (g_decorative) {
@@ -1604,18 +1922,18 @@ static void maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
     strncpy(last_path, ve->abs_path, sizeof(last_path)); last_path[sizeof(last_path)-1] = '\0';
 
     // If directory mtime is newer than cache entry, rescan only that subtree
-    CacheEntry *ce = cache_get(cache, ve->abs_path);
+    unsigned long long old_sz = 0ULL;
+    time_t cached_mtime = 0;
+    int has_ce = cache_get_info(cache, ve->abs_path, &old_sz, &cached_mtime, NULL);
     struct stat st;
     if (lstat(ve->abs_path, &st) != 0) return;
-    if (!ce || st.st_mtime != ce->dir_mtime) {
-        // compute old size
-        unsigned long long old_sz = ce ? ce->size : 0ULL;
+    if (!has_ce || st.st_mtime != cached_mtime) {
         char *cache_abs = path_join(root, CACHE_FILENAME);
         unsigned long long sz = scan_dir_recursive(ve->abs_path, root, cache_abs, cache, NULL);
         (void)sz;
         // compute delta and adjust ancestors + footer total
-        CacheEntry *ce_new = cache_get(cache, ve->abs_path);
-        unsigned long long new_sz = ce_new ? ce_new->size : 0ULL;
+        unsigned long long new_sz = 0ULL;
+        cache_get_info(cache, ve->abs_path, &new_sz, NULL, NULL);
         long long delta = (long long)new_sz - (long long)old_sz;
         if (delta > 0) cache_add_ancestors_after_delta(cache, root, ve->abs_path, (unsigned long long)delta);
         else if (delta < 0) cache_adjust_ancestors_after_delta(cache, root, ve->abs_path, (long long)(-delta));
@@ -1623,8 +1941,7 @@ static void maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
         else { unsigned long long dec = (unsigned long long)(-delta); if (g_last_bytes > dec) g_last_bytes -= dec; else g_last_bytes = 0ULL; }
         cache_save(root, cache);
         free(cache_abs);
-        ce = cache_get(cache, ve->abs_path);
-        if (ce) { ve->size = ce->size; ve->size_known = 1; }
+        if (cache_get_info(cache, ve->abs_path, &ve->size, NULL, NULL)) { ve->size_known = 1; }
     }
 }
 
@@ -1683,7 +2000,10 @@ static void schedule_marked_files_recalc(void) {
     if (pthread_create(&th, NULL, mf_worker, job) == 0) {
         pthread_detach(th);
     } else {
-        for (size_t i = 0; i < job->n; i++) free(job->paths[i]); free(job->paths); free(job);
+        for (size_t i = 0; i < job->n; i++)
+            free(job->paths[i]);
+        free(job->paths);
+        free(job);
         atomic_store(&g_mf_inflight, 0);
     }
 }
@@ -1717,8 +2037,8 @@ static unsigned long long compute_marked_total_bytes(Cache *cache) {
         if (S_ISREG(st.st_mode)) {
             total += (unsigned long long)st.st_size;
         } else if (S_ISDIR(st.st_mode)) {
-            CacheEntry *ce = cache_get(cache, path);
-            if (ce) total += ce->size;
+            unsigned long long sz = 0ULL;
+            if (cache_get_info(cache, path, &sz, NULL, NULL)) total += sz;
             // else skip (0) to avoid heavy sum_path_size traversal in render loop
         }
     }
@@ -1745,6 +2065,7 @@ static void show_help(void) {
         "",
         "Actions:",
         "  v - preview selected text file (scrollable layer)",
+        "  E - extension distribution view (current directory)",
         "  r - rescan selected dir",
         "  R - rescan current dir",
         "  f - find by name (case-insensitive), n/N next/prev",
@@ -1756,6 +2077,7 @@ static void show_help(void) {
         "  m - move marked to current directory",
         "  c - copy marked to current directory (with progress)",
         "  d - delete marked (if any) else delete selected",
+        "  O - open selected item with system default (xdg-open)",
         "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
 "  I - size display: numeric → percent → off",
@@ -2076,67 +2398,77 @@ snprintf(prompt, sizeof(prompt), "Delete %c '%s'? [y/N] ", is_dir ? 'D' : 'F', n
  * Returns 0 on success, -1 on error.
  */
 static int remove_tree(const char *path, const char *cache_file_abs) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return -1;
-    if (S_ISLNK(st.st_mode) || S_ISREG(st.st_mode)) {
-        // do not delete cache file even if requested
-        if (cache_file_abs && strcmp(path, cache_file_abs) == 0) return -1;
-        return unlink(path);
-    }
-    if (S_ISDIR(st.st_mode)) {
-        // protect against deleting the cache file by path match during walk
-        DIR *dp = opendir(path);
-        if (!dp) return -1;
-        struct dirent *de;
-        int rc = 0;
-        while ((de = readdir(dp)) != NULL) {
-            if (is_dot_or_dotdot(de->d_name)) continue;
-            char *p = path_join(path, de->d_name);
-            if (!p) { rc = -1; break; }
-            if (cache_file_abs && strcmp(p, cache_file_abs) == 0) { free(p); continue; }
-            if (remove_tree(p, cache_file_abs) != 0) { free(p); rc = -1; break; }
-            free(p);
+    // Iterative removal using a depth-sorted list of paths
+    size_t cap = 128, n = 0;
+    char **list = malloc(cap * sizeof(char*));
+    if (!list) return -1;
+    list[n++] = xstrdup(path);
+
+    // 1. Collect all paths (BFS-like walk)
+    for (size_t i = 0; i < n; i++) {
+        struct stat st;
+        if (lstat(list[i], &st) == 0 && S_ISDIR(st.st_mode)) {
+            DIR *dp = opendir(list[i]);
+            if (dp) {
+                struct dirent *de;
+                while ((de = readdir(dp)) != NULL) {
+                    if (is_dot_or_dotdot(de->d_name)) continue;
+                    char *child = path_join(list[i], de->d_name);
+                    if (!child) continue;
+                    if (cache_file_abs && strcmp(child, cache_file_abs) == 0) { free(child); continue; }
+                    if (n == cap) { cap *= 2; list = realloc(list, cap * sizeof(char*)); }
+                    list[n++] = child;
+                }
+                closedir(dp);
+            }
         }
-        closedir(dp);
-        if (rc != 0) return -1;
-        return rmdir(path);
     }
-    // other types
-    return -1;
+
+    // 2. Remove in reverse order (children first)
+    int final_rc = 0;
+    for (ssize_t i = (ssize_t)n - 1; i >= 0; i--) {
+        struct stat st;
+        int rc = 0;
+        if (lstat(list[i], &st) == 0) {
+            if (S_ISDIR(st.st_mode)) rc = rmdir(list[i]);
+            else rc = unlink(list[i]);
+        }
+        if (rc != 0) final_rc = -1;
+        free(list[i]);
+    }
+    free(list);
+    return final_rc;
 }
 
 static void cache_remove_prefix(Cache *c, const char *prefix) {
-    pthread_mutex_lock(&c->mu);
-    size_t w = 0;
-    for (size_t i = 0; i < c->n; i++) {
-        if (starts_with(c->v[i].abs_path, prefix)) {
-            free(c->v[i].abs_path);
-            free(c->v[i].rel_path);
-            continue; // skip
+    for (int h = 0; h < CACHE_SHARDS; h++) {
+        pthread_mutex_lock(&c->shards[h].mu);
+        size_t w = 0;
+        for (size_t i = 0; i < c->shards[h].n; i++) {
+            if (starts_with(c->shards[h].v[i].abs_path, prefix)) {
+                free(c->shards[h].v[i].abs_path);
+                free(c->shards[h].v[i].rel_path);
+                continue; // skip
+            }
+            if (w != i) c->shards[h].v[w] = c->shards[h].v[i];
+            w++;
         }
-        if (w != i) c->v[w] = c->v[i];
-        w++;
+        c->shards[h].n = w;
+        pthread_mutex_unlock(&c->shards[h].mu);
     }
-    c->n = w;
-    pthread_mutex_unlock(&c->mu);
 }
 
 static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta) {
     if (delta <= 0) return;
-    time_t now = time(NULL);
     char *p = xstrdup(abs_path);
     if (!p) return;
     // start from parent of abs_path
     char *cur = get_parent(p);
     free(p);
     while (cur) {
-        CacheEntry *ce = cache_get(c, cur);
-        if (ce) {
-            if (ce->size > (unsigned long long)delta) ce->size -= (unsigned long long)delta; else ce->size = 0ULL;
-            ce->last_scan = now;
-            struct stat st;
-            if (stat(cur, &st) == 0) ce->dir_mtime = st.st_mtime;
-        }
+        struct stat st;
+        time_t m = (stat(cur, &st) == 0) ? st.st_mtime : 0;
+        cache_update_size(c, cur, -delta, m);
         if (strcmp(cur, root) == 0) break;
         char *parent = get_parent(cur);
         free(cur);
@@ -2147,18 +2479,14 @@ static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const
 
 static void cache_add_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, unsigned long long delta) {
     if (delta == 0) return;
-    time_t now = time(NULL);
     char *p = xstrdup(abs_path);
     if (!p) return;
     char *cur = get_parent(p);
     free(p);
     while (cur) {
-        CacheEntry *ce = cache_get(c, cur);
-        if (ce) {
-            ce->size += delta;
-            ce->last_scan = now;
-            struct stat st; if (stat(cur, &st) == 0) ce->dir_mtime = st.st_mtime;
-        }
+        struct stat st;
+        time_t m = (stat(cur, &st) == 0) ? st.st_mtime : 0;
+        cache_update_size(c, cur, (long long)delta, m);
         if (strcmp(cur, root) == 0) break;
         char *parent = get_parent(cur);
         free(cur);
@@ -2169,30 +2497,54 @@ static void cache_add_ancestors_after_delta(Cache *c, const char *root, const ch
 
 static void cache_move_prefix(Cache *c, const char *root, const char *old_prefix, const char *new_prefix) {
     size_t lold = strlen(old_prefix);
-    pthread_mutex_lock(&c->mu);
-    for (size_t i = 0; i < c->n; i++) {
-        if (starts_with(c->v[i].abs_path, old_prefix)) {
-            const char *suffix = c->v[i].abs_path + lold;
-            char *new_abs = NULL;
-            if (suffix[0] == '\0') {
-                new_abs = xstrdup(new_prefix);
-            } else if (suffix[0] == '/') {
-                const char *rest = suffix + 1;
-                new_abs = path_join(new_prefix, rest);
-            } else {
-                new_abs = path_join(new_prefix, suffix);
+    // Temporary storage for entries being moved
+    size_t cap = 128, n = 0;
+    CacheEntry *temp = malloc(cap * sizeof(CacheEntry));
+    if (!temp) return;
+
+    for (int h = 0; h < CACHE_SHARDS; h++) {
+        pthread_mutex_lock(&c->shards[h].mu);
+        size_t w = 0;
+        for (size_t i = 0; i < c->shards[h].n; i++) {
+            if (starts_with(c->shards[h].v[i].abs_path, old_prefix)) {
+                if (n == cap) {
+                    cap *= 2;
+                    temp = realloc(temp, cap * sizeof(CacheEntry));
+                }
+                temp[n++] = c->shards[h].v[i];
+                continue;
             }
-            if (new_abs) {
-                free(c->v[i].abs_path);
-                c->v[i].abs_path = new_abs;
-                free(c->v[i].rel_path);
-                c->v[i].rel_path = relpath_from_abs(root, new_abs);
-                struct stat st; if (stat(new_abs, &st) == 0) c->v[i].dir_mtime = st.st_mtime;
-                c->v[i].last_scan = time(NULL);
-            }
+            if (w != i) c->shards[h].v[w] = c->shards[h].v[i];
+            w++;
+        }
+        c->shards[h].n = w;
+        pthread_mutex_unlock(&c->shards[h].mu);
+    }
+
+    // Update and re-insert
+    for (size_t i = 0; i < n; i++) {
+        const char *suffix = temp[i].abs_path + lold;
+        char *new_abs = NULL;
+        if (suffix[0] == '\0') new_abs = xstrdup(new_prefix);
+        else if (suffix[0] == '/') new_abs = path_join(new_prefix, suffix + 1);
+        else new_abs = path_join(new_prefix, suffix);
+
+        if (new_abs) {
+            free(temp[i].abs_path);
+            temp[i].abs_path = new_abs;
+            free(temp[i].rel_path);
+            temp[i].rel_path = relpath_from_abs(root, new_abs);
+            struct stat st; if (stat(new_abs, &st) == 0) temp[i].dir_mtime = st.st_mtime;
+            temp[i].last_scan = time(NULL);
+            
+            // Re-insert into correct shard
+            cache_upsert_with_meta(c, root, temp[i].abs_path, temp[i].size, temp[i].last_scan, temp[i].ino, temp[i].dir_mtime);
+            // Free the memory we just moved (upsert copied it)
+            free(temp[i].abs_path);
+            free(temp[i].rel_path);
         }
     }
-    pthread_mutex_unlock(&c->mu);
+    free(temp);
 }
 
 // ------------------------------
@@ -2318,6 +2670,7 @@ typedef struct DirTask {
     WaitGroupC *wg;
     TaskQueue *q;
     TaskQueue *finalq; // queue for finalizer thread
+    InodeSet *is;
 } DirTask;
 
 static void finalize_task(DirTask *t);
@@ -2337,6 +2690,7 @@ static void enqueue_child(DirTask *parent, int cfd, const char *name) {
     child->cache_abs = parent->cache_abs;
     child->cache = parent->cache;
     child->parent = parent;
+    child->is = parent->is;
     atomic_store(&child->files_size, 0ULL);
     atomic_store(&child->children_size, 0ULL);
     // Initialize child's pending to 1 to account for its own processing phase
@@ -2408,7 +2762,9 @@ static void process_task(DirTask *t) {
     }
     struct dirent *de;
     while ((de = readdir(dp)) != NULL) {
+        if (g_interrupted) break;
         if (is_dot_or_dotdot(de->d_name)) continue;
+        if (is_excluded(de->d_name)) continue;
         atomic_fetch_add(&g_progress_count, 1ULL);
         if (t->abs_path && t->root) {
             if (strcmp(t->abs_path, t->root) == 0 && strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
@@ -2421,22 +2777,35 @@ static void process_task(DirTask *t) {
             if (S_ISLNK(st0.st_mode)) continue;
             if (S_ISDIR(st0.st_mode)) dt = DT_DIR; else if (S_ISREG(st0.st_mode)) dt = DT_REG;
             if (dt == DT_REG) {
-                unsigned long long b = file_size_bytes(&st0);
-                atomic_fetch_add(&t->files_size, b);
-                atomic_fetch_add(&g_total_files, 1ULL);
-                atomic_fetch_add(&g_total_bytes, b);
+                if (st0.st_nlink <= 1 || !inodeset_check_and_add(t->is, st0.st_dev, st0.st_ino)) {
+                    unsigned long long b = file_size_bytes(&st0);
+                    atomic_fetch_add(&t->files_size, b);
+                    atomic_fetch_add(&g_total_files, 1ULL);
+                    atomic_fetch_add(&g_total_bytes, b);
+                }
             }
         } else if (dt == DT_REG) {
             struct stat stf;
             if (fstatat(t->dirfd, de->d_name, &stf, AT_SYMLINK_NOFOLLOW) == 0) {
-                unsigned long long b = file_size_bytes(&stf);
-                atomic_fetch_add(&t->files_size, b);
-                atomic_fetch_add(&g_total_files, 1ULL);
-                atomic_fetch_add(&g_total_bytes, b);
+                if (stf.st_nlink <= 1 || !inodeset_check_and_add(t->is, stf.st_dev, stf.st_ino)) {
+                    unsigned long long b = file_size_bytes(&stf);
+                    atomic_fetch_add(&t->files_size, b);
+                    atomic_fetch_add(&g_total_files, 1ULL);
+                    atomic_fetch_add(&g_total_bytes, b);
+                }
             }
         } else if (dt == DT_DIR) {
             int cfd = openat(t->dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if (cfd >= 0) enqueue_child(t, cfd, de->d_name);
+            if (cfd >= 0) {
+                if (g_one_file_system) {
+                    struct stat stch;
+                    if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) {
+                        close(cfd);
+                        continue;
+                    }
+                }
+                enqueue_child(t, cfd, de->d_name);
+            }
         }
     }
     closedir(dp);
@@ -2456,6 +2825,7 @@ typedef struct {
     pthread_t *th;
     pthread_t fin_th;
     WaitGroupC wg;
+    InodeSet is;
 } ScanPool;
 
 static void *worker_loop(void *arg) {
@@ -2512,6 +2882,7 @@ static void *finalizer_loop(void *arg) {
  */
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads) {
     ScanPool p; tq_init(&p.q, 16384); tq_init(&p.finq, 16384);
+    inodeset_init(&p.is, 65536);
     p.threads = threads; p.th = malloc((size_t)threads * sizeof(pthread_t)); wg_init(&p.wg);
     // start workers and finalizer
     for (int i = 0; i < threads; i++) pthread_create(&p.th[i], NULL, worker_loop, &p);
@@ -2522,9 +2893,10 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     atomic_store(&g_total_files, 0ULL);
     atomic_store(&g_total_bytes, 0ULL);
     int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) { tq_close(&p.q); for (int i = 0; i < threads; i++) pthread_join(p.th[i], NULL); tq_destroy(&p.q); free(p.th); return 0ULL; }
+    if (fd < 0) { tq_close(&p.q); for (int i = 0; i < threads; i++) pthread_join(p.th[i], NULL); tq_destroy(&p.q); free(p.th); inodeset_free(&p.is); return 0ULL; }
     DirTask *rt = malloc(sizeof(DirTask));
     rt->dirfd = fd; rt->abs_path = xstrdup(root); rt->root = root; rt->cache_abs = cache_abs; rt->cache = cache; rt->parent = NULL;
+    rt->is = &p.is;
     atomic_store(&rt->files_size, 0ULL); atomic_store(&rt->children_size, 0ULL);
     // Initialize pending to 1 (self processing), children will add more
     atomic_store(&rt->pending, 1);
@@ -2569,6 +2941,7 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     tq_close(&p.finq);
     pthread_join(p.fin_th, NULL);
     tq_destroy(&p.q); tq_destroy(&p.finq); free(p.th);
+    inodeset_free(&p.is);
 
     // Clear progress line
     int cols, rows; getmaxyx(stdscr, rows, cols);
@@ -2579,8 +2952,9 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     g_last_files = atomic_load(&g_total_files);
     g_last_bytes = atomic_load(&g_total_bytes);
 
-    CacheEntry *ce = cache_get(cache, root);
-    return ce ? ce->size : 0ULL;
+    unsigned long long rs = 0ULL;
+    cache_get_info(cache, root, &rs, NULL, NULL);
+    return rs;
 }
 
 // ------------------------------
@@ -2616,8 +2990,13 @@ static void crash_handler(int sig) {
     raise(sig);
 }
 
+static void sigint_handler(int sig) {
+    (void)sig;
+    g_interrupted = 1;
+}
+
 static void install_signal_handlers(void) {
-    int sigs[] = { SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGTERM, SIGINT, SIGHUP };
+    int sigs[] = { SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGTERM, SIGHUP };
     struct sigaction sa; memset(&sa, 0, sizeof(sa));
     sa.sa_handler = crash_handler;
     sigemptyset(&sa.sa_mask);
@@ -2625,6 +3004,11 @@ static void install_signal_handlers(void) {
     for (size_t i = 0; i < sizeof(sigs)/sizeof(sigs[0]); i++) {
         sigaction(sigs[i], &sa, NULL);
     }
+    // Specific handler for SIGINT to allow clean interruption
+    struct sigaction sa_int; memset(&sa_int, 0, sizeof(sa_int));
+    sa_int.sa_handler = sigint_handler;
+    sigemptyset(&sa_int.sa_mask);
+    sigaction(SIGINT, &sa_int, NULL);
 }
 
 // ------------------------------
@@ -2649,9 +3033,19 @@ int main(int argc, char **argv) {
     int cli_help_flag = 0;
     const char *path_arg = NULL;
     int headless_flag = 0;
+    const char *export_format = NULL;
+    const char *export_file = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-R") == 0 || strcmp(argv[i], "--reload") == 0) {
             reload_flag = 1;
+        } else if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exclude") == 0) {
+            if (i + 1 < argc) { exclude_add(argv[++i]); }
+        } else if (strcmp(argv[i], "--export") == 0) {
+            if (i + 2 < argc) {
+                export_format = argv[++i];
+                export_file = argv[++i];
+                headless_flag = 1; // Export implies headless
+            }
         } else if (strcmp(argv[i], "-j") == 0 || strcmp(argv[i], "--jobs") == 0) {
             if (i + 1 < argc) { jobs_override = atoi(argv[++i]); }
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -2662,6 +3056,8 @@ int main(int argc, char **argv) {
             cli_help_flag = 1;
         } else if (strcmp(argv[i], "-ac") == 0 || strcmp(argv[i], "--accuracy") == 0) {
             g_accuracy_mode = 1;
+        } else if (strcmp(argv[i], "-x") == 0 || strcmp(argv[i], "--one-file-system") == 0) {
+            g_one_file_system = 1;
         } else if (strcmp(argv[i], "-D") == 0 || strcmp(argv[i], "--decorative") == 0) {
             g_decorative = 1;
         } else {
@@ -2706,6 +3102,13 @@ int main(int argc, char **argv) {
 fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         return 1;
     }
+
+    struct stat st_root;
+    if (stat(root, &st_root) == 0) {
+        g_root_dev = st_root.st_dev;
+    }
+
+    load_fastduignore(root);
 
     // TTY / headless setup
     if (!headless) {
@@ -2764,8 +3167,9 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
             // Clear progress line
             if (!headless) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
             // Totali accurati
-            CacheEntry *root_ce = cache_get(&cache, root);
-            g_last_bytes = root_ce ? root_ce->size : 0ULL;
+            unsigned long long rs = 0ULL;
+            cache_get_info(&cache, root, &rs, NULL, NULL);
+            g_last_bytes = rs;
             g_last_files = count_files_path(root);
         } else {
             int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
@@ -2781,8 +3185,9 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         }
     } else {
         // Cache loaded: set footer totals from cache root entry (v2/v3)
-        CacheEntry *root_ce = cache_get(&cache, root);
-        if (root_ce) g_last_bytes = root_ce->size; else g_last_bytes = 0ULL;
+        unsigned long long rs = 0ULL;
+        cache_get_info(&cache, root, &rs, NULL, NULL);
+        g_last_bytes = rs;
         // If the loaded cache (older versions) didn't persist totals_files, compute once and persist
         // Skip this in headless to avoid long blocking walks before summary
         if (!g_headless && g_last_files == 0ULL) {
@@ -2794,6 +3199,19 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
     if (headless) {
         if (debug_all) fprintf(stderr, "[dbg] entering headless summary branch\n");
+
+        if (export_format && export_file) {
+            if (strcmp(export_format, "json") == 0) {
+                cache_export_json(&cache, export_file);
+                fprintf(stderr, "[export] JSON written to %s\n", export_file);
+            } else if (strcmp(export_format, "csv") == 0) {
+                cache_export_csv(&cache, export_file);
+                fprintf(stderr, "[export] CSV written to %s\n", export_file);
+            } else {
+                fprintf(stderr, "Unsupported export format: %s\n", export_format);
+            }
+        }
+
         // In headless mode, if -R was requested we already rescanned; otherwise we may have loaded cache.
         // Print a short summary and exit.
         // Print on stdout
@@ -2815,13 +3233,16 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         }
         if (debug_cache || debug_all) fprintf(stderr, "[main] headless summary printed, exiting.\n");
         // In debug, exit immediately without further cleanup to avoid any hidden blockers
-        if (debug_all) { _exit(0); }
+        if (debug_all) { free(cache_abs); _exit(0); }
         const char *skip_free = getenv("FASTDU_SKIP_FREE_CACHE");
         if (skip_free && skip_free[0]=='1') {
             if (debug_all) fprintf(stderr, "[dbg] skipping cache_free due to FASTDU_SKIP_FREE_CACHE=1\n");
+            free(cache_abs);
             _exit(0);
         }
         cache_free(&cache);
+        free(cache_abs);
+        exclude_free();
         if (debug_all) fprintf(stderr, "[dbg] cache_free done, exiting now\n");
         return 0;
     }
@@ -2917,7 +3338,7 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                 char *sel_path = xstrdup(ve->abs_path);
                 if (ve->is_dir) {
                     // compute old size and preserve current global total
-                    unsigned long long old_sz = 0ULL; CacheEntry *ce_old = cache_get(&cache, ve->abs_path); if (ce_old) old_sz = ce_old->size;
+                    unsigned long long old_sz = 0ULL; cache_get_info(&cache, ve->abs_path, &old_sz, NULL, NULL);
                     unsigned long long prev_total = g_last_bytes;
                     // compute old files count for delta adjustment
                     unsigned long long old_files = count_files_path(ve->abs_path);
@@ -2930,7 +3351,7 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                         (void)scan_dir_parallel_deep(scan_path, cache_abs, &cache, threads);
                         free(scan_path);
                         // compute delta and adjust ancestors
-                        unsigned long long new_sz = 0ULL; CacheEntry *ce_new = cache_get(&cache, ve->abs_path); if (ce_new) new_sz = ce_new->size;
+                        unsigned long long new_sz = 0ULL; cache_get_info(&cache, ve->abs_path, &new_sz, NULL, NULL);
                         long long delta = (long long)new_sz - (long long)old_sz;
                         if (delta > 0) cache_add_ancestors_after_delta(&cache, root, ve->abs_path, (unsigned long long)delta);
                         else if (delta < 0) cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
@@ -3105,7 +3526,20 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                     }
                 }
             }
-        } else if (ch == 'o' || ch == 'O') {
+        } else if (ch == 'E') {
+            show_extension_view(&dv);
+        } else if (ch == 'O') {
+            if (dv.n > 0) {
+                ViewEntry *ve = &dv.v[dv.selected];
+                char cmd[PATH_MAX + 64];
+                snprintf(cmd, sizeof(cmd), "xdg-open \"%s\" >/dev/null 2>&1 &", ve->abs_path);
+                if (system(cmd) == -1) {
+                    draw_status("Failed to launch xdg-open.");
+                } else {
+                    draw_status("Opening with system default...");
+                }
+            }
+        } else if (ch == 'o') {
             // cycle sort key (size -> name -> mtime -> size), keep selection on same path
             SortMode next_mode = (g_sort_mode == SORT_SIZE) ? SORT_NAME : (g_sort_mode == SORT_NAME ? SORT_MTIME : SORT_SIZE);
             if (dv.n > 0) {
@@ -3220,7 +3654,7 @@ draw_status("No items marked.");
                         if (!dst) continue;
                         // compute delta
                         unsigned long long delta=0ULL; struct stat st; int is_dir=0;
-                        if (lstat(src,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; CacheEntry*ce=cache_get(&cache,src); if(ce) delta=ce->size; else delta=scan_dir_recursive(src, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
+                        if (lstat(src,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; if(!cache_get_info(&cache,src,&delta,NULL,NULL)) delta=scan_dir_recursive(src, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
                         // handle conflict
                         if (path_exists(dst)) {
                             char act = conflict_all_m ? conflict_action_all_m : prompt_conflict_action(dst);
@@ -3310,8 +3744,8 @@ draw_status("No items marked.");
                             (void)scan_dir_recursive(dst, root, cache_abs, &cache, NULL);
                             free(cache_abs);
                             // add delta to ancestors using estimated (or recompute size via cache)
-                            CacheEntry *ced = cache_get(&cache, dst);
-                            unsigned long long dsz = ced ? ced->size : sum_path_size(dst);
+                            unsigned long long dsz = 0ULL;
+                            if (!cache_get_info(&cache, dst, &dsz, NULL, NULL)) dsz = sum_path_size(dst);
                             cache_add_ancestors_after_delta(&cache, root, dst, dsz);
                             // increment global files by files copied under dst
                             unsigned long long finc = count_files_path(dst);
@@ -3361,7 +3795,7 @@ draw_status("Copy completed.");
                         const char *p = list[i];
                         // compute delta bytes and files
                         unsigned long long delta=0ULL; struct stat st; int is_dir=0;
-                        if (lstat(p,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; CacheEntry*ce=cache_get(&cache,p); if(ce) delta=ce->size; else delta=scan_dir_recursive(p, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
+                        if (lstat(p,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; if(!cache_get_info(&cache,p,&delta,NULL,NULL)) delta=scan_dir_recursive(p, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
                         unsigned long long files_dec = count_files_path(p);
                         // delete
                         if (remove_tree(p, cache_abs)==0){ if (is_dir) cache_remove_prefix(&cache,p); cache_adjust_ancestors_after_delta(&cache, root, p, (long long)delta); if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL; }
@@ -3390,9 +3824,7 @@ draw_status("Delete completed.");
                         if (!is_dir && S_ISREG(st_before.st_mode)) {
                             delta = (unsigned long long)st_before.st_size;
                         } else if (is_dir) {
-                            CacheEntry *ce_del = cache_get(&cache, ve->abs_path);
-                            if (ce_del) delta = ce_del->size;
-                            else {
+                            if (!cache_get_info(&cache, ve->abs_path, &delta, NULL, NULL)) {
                                 // Stima dimensione della dir da eliminare (solo il subtree target)
                                 delta = scan_dir_recursive(ve->abs_path, root, cache_abs, &cache, NULL);
                             }
@@ -3433,5 +3865,6 @@ snprintf(msg, sizeof(msg), "Error deleting '%s'", ve->name);
     cache_free(&cache);
     if (g_regex_enabled) { regfree(&g_regex); g_regex_enabled = 0; }
     free(cache_abs);
+    exclude_free();
     return 0;
 }
