@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- Current version: 0.43.0
+- Current version: 0.44.0
 - License: MIT (suggested; adjust if different)
 
 ---
@@ -23,6 +23,13 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
 
 ---
+
+## What’s new in 0.44.0
+
+- **UI Refinement**: Removed redundant redraw calls in the main loop for smoother interaction.
+- **Improved Deletion UX**: After deleting an item, the selection logic is smarter (points to the next item or the new last item), keeping the navigation flow uninterrupted.
+- **Memory Safety**: Added explicit validation before freeing memory in bulk move/copy/delete operations.
+- **Robust Error Handling**: Added proper checks for `lstat` failures during deletion with user feedback.
 
 ## What’s new in 0.43.0
 

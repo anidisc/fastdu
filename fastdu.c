@@ -118,7 +118,7 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.43.0"
+#define FASTDU_VERSION "0.44.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -3274,19 +3274,13 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
     int ch;
     while (1) {
+        // Handle automatic updates (if any) and trigger redraw if needed
+        (void)maybe_rescan_hovered(&dv, root, &cache);
+
         erase();
         draw_header(root, current, &cache);
         draw_list(&dv, top);
         refresh();
-
-        // Controllo differenze quando il cursore è su una cartella
-        if (maybe_rescan_hovered(&dv, root, &cache)) {
-            // ridisegna list dopo aggiornamento
-            erase();
-            draw_header(root, current, &cache);
-            draw_list(&dv, top);
-            refresh();
-        }
 
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;
@@ -3713,20 +3707,24 @@ draw_status("No items marked.");
                     cache_save(root,&cache);
                     // clear all marks after move to avoid unintended operations
                     markset_clear(&g_marks);
-                    for(size_t i=0;i<n;i++) {
-                        free(list[i]);
+                    if (list) {
+                        for(size_t i=0;i<n;i++) {
+                            free(list[i]);
+                        }
+                        free(list);
                     }
-                    free(list);
-                    // Refresh view
+                    // Refresh view and restore selection
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
                     draw_status("Move completed.");
                 } else {
-                    for(size_t i=0;i<n;i++) {
-                        free(list[i]);
+                    if (list) {
+                        for(size_t i=0;i<n;i++) {
+                            free(list[i]);
+                        }
+                        free(list);
                     }
-                    free(list);
                 }
             }
         } else if (ch == 'c') {
@@ -3789,20 +3787,24 @@ draw_status("No items marked.");
                     cache_save(root, &cache);
                     // clear all marks after copy to avoid unintended operations
                     markset_clear(&g_marks);
-                    for (size_t i=0;i<n;i++) {
-                        free(list[i]);
+                    if (list) {
+                        for (size_t i = 0; i < n; i++) {
+                            free(list[i]);
+                        }
+                        free(list);
                     }
-                    free(list);
-                    // Refresh view
+                    // Refresh view and restore selection
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
-draw_status("Copy completed.");
+                    draw_status("Copy completed.");
                 } else {
-                    for (size_t i=0;i<n;i++) {
-                        free(list[i]);
+                    if (list) {
+                        for (size_t i = 0; i < n; i++) {
+                            free(list[i]);
+                        }
+                        free(list);
                     }
-                    free(list);
                 }
             }
         } else if (ch == 'd') {
@@ -3834,15 +3836,23 @@ draw_status("Copy completed.");
                     }
                     cache_save(root,&cache);
                     // clear marks that were deleted
-                    for(size_t i=0;i<n;i++){ markset_remove(&g_marks, list[i]); free(list[i]); } free(list);
-                    // refresh view
+                    if (list) {
+                        for(size_t i=0;i<n;i++) {
+                            markset_remove(&g_marks, list[i]);
+                            free(list[i]);
+                        }
+                        free(list);
+                    }
+                    // refresh view and restore selection
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
-draw_status("Delete completed.");
+                    draw_status("Delete completed.");
                 } else {
-                    for(size_t i=0;i<n;i++) free(list[i]);
-                    free(list);
+                    if (list) {
+                        for(size_t i=0;i<n;i++) free(list[i]);
+                        free(list);
+                    }
                 }
             } else if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
@@ -3851,8 +3861,10 @@ draw_status("Delete completed.");
                     struct stat st_before;
                     int exists_before = (lstat(ve->abs_path, &st_before) == 0);
                     unsigned long long delta = 0ULL;
+                    unsigned long long files_dec = 0ULL;
                     int is_dir = ve->is_dir;
                     if (exists_before) {
+                        files_dec = count_files_path(ve->abs_path);
                         if (!is_dir && S_ISREG(st_before.st_mode)) {
                             delta = (unsigned long long)st_before.st_size;
                         } else if (is_dir) {
@@ -3861,6 +3873,10 @@ draw_status("Delete completed.");
                                 delta = scan_dir_recursive(ve->abs_path, root, cache_abs, &cache, NULL);
                             }
                         }
+                    } else {
+                        draw_status("Error: File or directory no longer exists.");
+                        refresh();
+                        napms(1000);
                     }
 
                     // Elimina
@@ -3869,8 +3885,7 @@ draw_status("Delete completed.");
                     if (rc == 0) {
                         if (is_dir) cache_remove_prefix(&cache, ve->abs_path);
                         cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)delta);
-                        // decrement global files by files under removed path
-                        unsigned long long files_dec = count_files_path(ve->abs_path);
+                        if (g_last_bytes > delta) g_last_bytes -= delta; else g_last_bytes = 0ULL;
                         if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL;
                         cache_save(root, &cache);
                         // unmark removed path and any subpaths
@@ -3882,7 +3897,7 @@ draw_status("Delete completed.");
                         draw_status("Erase completed.");
                     } else {
                         char msg[PATH_MAX + 64];
-snprintf(msg, sizeof(msg), "Error deleting '%s'", ve->name);
+                        snprintf(msg, sizeof(msg), "Error deleting '%s'", ve->name);
                         draw_status(msg);
                     }
                 }
