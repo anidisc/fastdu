@@ -118,7 +118,7 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.41.0"
+#define FASTDU_VERSION "0.42.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -705,9 +705,14 @@ static void draw_cache_progress(const char *cache_path, FILE *f, long total_byte
         double frac = (double)cur / (double)total_bytes; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
         filled = (int)(frac * barlen);
         percent = (int)(frac * 100.0 + 0.5);
-    } else { *spinner = (*spinner + 1) % barlen; filled = *spinner; }
-    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
-    for (int i = 0; i < filled; i++) bar[i] = '#'; bar[barlen] = '\0';
+    } else {
+        *spinner = (*spinner + 1) % barlen;
+        filled = *spinner;
+    }
+    if (filled < 0) filled = 0;
+    if (filled > barlen) filled = barlen;
+    for (int i = 0; i < filled; i++) bar[i] = '#';
+    bar[barlen] = '\0';
     char linebuf[PATH_MAX + 256];
     snprintf(linebuf, sizeof(linebuf), " Cache: [%s] %3d%% - %s", bar, percent, cache_path);
     mvhline(rows-1, 0, ' ', cols);
@@ -881,7 +886,8 @@ static void draw_copy_progress(CopyUI *ui, const char *current_path) {
     double frac = (ui->total > 0) ? ((double)ui->done / (double)ui->total) : 0.0;
     if (frac > 1.0) frac = 1.0;
     int filled = (int)(frac * barlen);
-    if (filled < 0) filled = 0; if (filled > barlen) filled = barlen;
+    if (filled < 0) filled = 0;
+    if (filled > barlen) filled = barlen;
     for (int i=0;i<barlen;i++) bar[i] = (i < filled) ? '#' : '.';
     bar[barlen] = '\0';
     char donebuf[64], totalbuf[64];
@@ -1931,31 +1937,13 @@ static int maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
     last_check = now;
     strncpy(last_path, ve->abs_path, sizeof(last_path)); last_path[sizeof(last_path)-1] = '\0';
 
-    // If directory mtime is newer than cache entry, rescan only that subtree
-    unsigned long long old_sz = 0ULL;
-    time_t cached_mtime = 0;
-    int has_ce = cache_get_info(cache, ve->abs_path, &old_sz, &cached_mtime, NULL);
-    struct stat st;
-    if (lstat(ve->abs_path, &st) != 0) return 0;
-    if (!has_ce || st.st_mtime != cached_mtime) {
-        char *cache_abs = path_join(root, CACHE_FILENAME);
-        // Use parallel scan even for hovered dir for speed
-        int threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
-        if (threads < 1) threads = 1; if (threads > 16) threads = 16;
-        (void)scan_dir_parallel_deep(ve->abs_path, cache_abs, cache, threads);
-        
-        // compute delta and adjust ancestors + footer total
-        unsigned long long new_sz = 0ULL;
-        cache_get_info(cache, ve->abs_path, &new_sz, NULL, NULL);
-        long long delta = (long long)new_sz - (long long)old_sz;
-        if (delta > 0) cache_add_ancestors_after_delta(cache, root, ve->abs_path, (unsigned long long)delta);
-        else if (delta < 0) cache_adjust_ancestors_after_delta(cache, root, ve->abs_path, (long long)(-delta));
-        if (delta >= 0) g_last_bytes += (unsigned long long)delta;
-        else { unsigned long long dec = (unsigned long long)(-delta); if (g_last_bytes > dec) g_last_bytes -= dec; else g_last_bytes = 0ULL; }
-        cache_save(root, cache);
-        free(cache_abs);
-        if (cache_get_info(cache, ve->abs_path, &ve->size, NULL, NULL)) { ve->size_known = 1; }
-        return 1; // Rescanned
+    // Update entry size from cache if it was unknown, but NEVER trigger a new disk scan automatically.
+    // Automatic disk scans during scrolling cause severe lag on large trees.
+    if (!ve->size_known) {
+        if (cache_get_info(cache, ve->abs_path, &ve->size, NULL, NULL)) {
+            ve->size_known = 1;
+            return 1; // Need redraw
+        }
     }
     return 0;
 }
@@ -3704,14 +3692,20 @@ draw_status("No items marked.");
                     cache_save(root,&cache);
                     // clear all marks after move to avoid unintended operations
                     markset_clear(&g_marks);
-                    for(size_t i=0;i<n;i++) free(list[i]); free(list);
+                    for(size_t i=0;i<n;i++) {
+                        free(list[i]);
+                    }
+                    free(list);
                     // Refresh view
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
                     draw_status("Move completed.");
                 } else {
-                    for(size_t i=0;i<n;i++) free(list[i]); free(list);
+                    for(size_t i=0;i<n;i++) {
+                        free(list[i]);
+                    }
+                    free(list);
                 }
             }
         } else if (ch == 'c') {
@@ -3774,14 +3768,20 @@ draw_status("No items marked.");
                     cache_save(root, &cache);
                     // clear all marks after copy to avoid unintended operations
                     markset_clear(&g_marks);
-                    for (size_t i=0;i<n;i++) free(list[i]); free(list);
+                    for (size_t i=0;i<n;i++) {
+                        free(list[i]);
+                    }
+                    free(list);
                     // Refresh view
                     size_t old_index = dv.selected;
                     view_free(&dv); build_dir_view(current, root, &cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
 draw_status("Copy completed.");
                 } else {
-                    for (size_t i=0;i<n;i++) free(list[i]); free(list);
+                    for (size_t i=0;i<n;i++) {
+                        free(list[i]);
+                    }
+                    free(list);
                 }
             }
         } else if (ch == 'd') {
