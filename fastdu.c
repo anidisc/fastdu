@@ -118,7 +118,7 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.42.0"
+#define FASTDU_VERSION "0.43.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -747,6 +747,7 @@ static int cache_load(const char *root, Cache *c) {
     char *line = NULL; size_t len = 0; ssize_t r;
     int header_ok = 0; int version = 1;
     unsigned long long totals_files = 0ULL;
+    unsigned long long count_v1_v2 = 0ULL;
     unsigned long long lines_read = 0ULL;
     while ((r = getline(&line, &len, f)) != -1) {
         if (g_interrupted) break;
@@ -774,6 +775,7 @@ static int cache_load(const char *root, Cache *c) {
             continue;
         }
         if (line[0] == 'D' && line[1] == '\t') {
+            count_v1_v2++;
             char *p = line + 2;
             char *rel = p;
             char *tab1 = strchr(p, '\t');
@@ -824,6 +826,7 @@ static int cache_load(const char *root, Cache *c) {
     free(cache_path);
     // set runtime totals from cache if present
     if (totals_files > 0ULL) g_last_files = totals_files;
+    else if (count_v1_v2 > 0ULL) g_last_files = count_v1_v2; // fallback for older caches
     return 1; // loaded
 }
 
@@ -3184,13 +3187,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         unsigned long long rs = 0ULL;
         cache_get_info(&cache, root, &rs, NULL, NULL);
         g_last_bytes = rs;
-        // If the loaded cache (older versions) didn't persist totals_files, compute once and persist
-        // Skip this in headless to avoid long blocking walks before summary
-        if (!g_headless && g_last_files == 0ULL) {
-            unsigned long long files_cnt = count_files_path(root);
-            g_last_files = files_cnt;
-            cache_save(root, &cache);
-        }
+        // totals_files is already set by cache_load parsing (version 3 or row counting)
     }
 
     if (headless) {

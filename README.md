@@ -2,15 +2,16 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- Current version: 0.42.0
+- Current version: 0.43.0
 - License: MIT (suggested; adjust if different)
 
 ---
 
 ## Highlights
 
+- **Instant Cache Loading**: Eliminated redundant disk walks during cache loading. Even massive cache files are now parsed instantly.
+- **Cache Progress Bar**: Visual feedback during the cache loading phase, showing real-time progress for large datasets.
 - **Ultra-Fluid Scrolling**: Optimized TUI rendering engine with cached metrics, providing instant response even in directories with 100,000+ files.
-- **Background Scan Removal**: Automatic re-scanning on hover has been disabled to ensure stability and respect the initial scan accuracy.
 - **Sharded Cache**: Performance-optimized cache with 64 independent locks to minimize thread contention.
 - **Hard Link Detection**: Accurate disk usage calculation by counting unique (dev, ino) pairs only once.
 - **Iterative Operations**: Tree removal and copying are now iterative, supporting extremely deep directory structures without stack overflow.
@@ -22,6 +23,12 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
 
 ---
+
+## What’s new in 0.43.0
+
+- **Cache Optimization**: Removed the "hidden" disk scan that occurred when loading caches missing file totals.
+- **Progress Feedback**: Added a progress bar during `cache_load` to show parsing status.
+- **Improved Counting**: Total file counts are now derived directly from the cache file structure if missing from the header.
 
 ## What’s new in 0.42.0
 
