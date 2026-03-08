@@ -68,10 +68,57 @@
 static volatile sig_atomic_t g_tui_active;
 static volatile sig_atomic_t g_interrupted = 0;
 
+// ------------------------------
+// Types and Structures (Early definitions)
+// ------------------------------
+
+typedef struct {
+    char *abs_path;
+    char *rel_path;
+    unsigned long long size;
+    time_t last_scan; // when we scanned
+    unsigned long long ino; // inode of directory
+    time_t dir_mtime; // mtime of directory at scan time
+} CacheEntry;
+
+#define CACHE_SHARDS 64
+
+typedef struct {
+    CacheEntry *v;
+    size_t n;
+    size_t cap;
+    pthread_mutex_t mu;
+} CacheShard;
+
+typedef struct {
+    CacheShard shards[CACHE_SHARDS];
+} Cache;
+
+typedef struct {
+    char *name;
+    char *abs_path;
+    int is_dir;
+    unsigned long long size;
+    int size_known;
+    time_t mtime;
+} ViewEntry;
+
+typedef struct {
+    ViewEntry *v;
+    size_t n;
+    size_t cap;
+    size_t selected;
+    char *path; // abs
+    int sizew;
+    unsigned long long view_total;
+} DirView;
+
 static void draw_status(const char *msg);
+static int compute_size_col_width(const DirView *dv);
+static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.40.0"
+#define FASTDU_VERSION "0.41.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -444,42 +491,6 @@ static char *abspath_from_rel(const char *root, const char *rel) {
 // ------------------------------
 // Forward declaration for global files counter used in cache I/O
 static unsigned long long g_last_files;
-
-/*
- * The in-memory cache maps absolute directories to: total size, inode and
- * mtime. It is serialized to a text file under the scan root (CACHE_FILENAME)
- * so results can be reused between runs.
- *
- * v2 format:
- *   # fastdu-cache v2
- *   root\t<abs_root>
- *   D\t<rel_path_pct>\t<size>\t<last_scan_epoch>\t<ino>\t<dir_mtime>
- *
- * - rel_path_pct: relative path, percent-encoded (tabs/newlines/% encoded).
- * - last_scan_epoch: time_t of the scan.
- * - ino/dir_mtime: allow fast invalidation checks.
- */
-typedef struct {
-    char *abs_path;
-    char *rel_path;
-    unsigned long long size;
-    time_t last_scan; // when we scanned
-    unsigned long long ino; // inode of directory
-    time_t dir_mtime; // mtime of directory at scan time
-} CacheEntry;
-
-#define CACHE_SHARDS 64
-
-typedef struct {
-    CacheEntry *v;
-    size_t n;
-    size_t cap;
-    pthread_mutex_t mu;
-} CacheShard;
-
-typedef struct {
-    CacheShard shards[CACHE_SHARDS];
-} Cache;
 
 static size_t cache_hash(const char *s) {
     size_t h = 5381;
@@ -1029,24 +1040,7 @@ static unsigned long long scan_dir_recursive(const char *dir, const char *root, 
  * restrict the list to files or directories. A case-insensitive in-memory
  * search lets you quickly jump the selection.
  */
-typedef struct {
-    char *name;
-    char *abs_path;
-    int is_dir;
-    unsigned long long size;
-    int size_known;
-    time_t mtime;
-} ViewEntry;
-
 static int selection_changed = 0;
-
-typedef struct {
-    ViewEntry *v;
-    size_t n;
-    size_t cap;
-    size_t selected;
-    char *path; // abs
-} DirView;
 
 // Navigation stack to restore selection/top when returning to parent
 typedef struct {
@@ -1281,6 +1275,15 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
     }
     closedir(dp);
     qsort(out->v, out->n, sizeof(ViewEntry), cmp_entries);
+
+    // Cache precomputations for fast drawing
+    out->sizew = compute_size_col_width(out);
+    out->view_total = 0ULL;
+    for (size_t i = 0; i < out->n; i++) {
+        if (out->v[i].size_known) out->view_total += out->v[i].size;
+    }
+    if (out->view_total == 0ULL) out->view_total = 1ULL;
+
     return 0;
 }
 
@@ -1725,7 +1728,7 @@ static void draw_list(const DirView *dv, int top) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
     int y = g_decorative ? 3 : 1; // below header and optional header-bar + thin line
     int list_rows = rows - 3 - (g_decorative ? 2 : 0); // header + footer [+ column bar + thin line]
-    int sizew = compute_size_col_width(dv);
+    int sizew = dv->sizew;
     int mark_col = 0; // mark column at 0
     int size_col = 2; // mark + space
     int type_col = size_col + (sizew > 0 ? (sizew + 1) : 0); // if size hidden, no gap
@@ -1772,12 +1775,7 @@ static void draw_list(const DirView *dv, int top) {
         attroff(COLOR_PAIR(2));
     }
 
-    // Precompute total size for percentage mode and bars (sum of known sizes in view)
-    unsigned long long view_total = 0ULL;
-    for (size_t i = 0; i < dv->n; i++) {
-        if (dv->v[i].size_known) view_total += dv->v[i].size;
-    }
-    if (view_total == 0ULL) view_total = 1ULL; // avoid div-by-zero
+    unsigned long long view_total = dv->view_total;
 
     for (int i = 0; i < list_rows; i++) {
         int idx = top + i;
@@ -1917,19 +1915,19 @@ static void cache_add_ancestors_after_delta(Cache *c, const char *root, const ch
  * (>=700ms or selection changed). If the directory mtime differs from
  * what is stored in the cache, rescan just that subtree to refresh data.
  */
-static void maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
+static int maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
     static char last_path[PATH_MAX] = "";
     static struct timespec last_check = {0,0};
 
-    if (dv->n == 0) return;
+    if (dv->n == 0) return 0;
     ViewEntry *ve = &dv->v[dv->selected];
-    if (!ve->is_dir) return;
+    if (!ve->is_dir) return 0;
 
     // debounce: only check if selection changed or after 700ms
     struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
     long ms = (now.tv_sec - last_check.tv_sec) * 1000 + (now.tv_nsec - last_check.tv_nsec) / 1000000;
     int changed = strcmp(last_path, ve->abs_path) != 0;
-    if (!changed && ms < 700) return;
+    if (!changed && ms < 700) return 0;
     last_check = now;
     strncpy(last_path, ve->abs_path, sizeof(last_path)); last_path[sizeof(last_path)-1] = '\0';
 
@@ -1938,11 +1936,14 @@ static void maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
     time_t cached_mtime = 0;
     int has_ce = cache_get_info(cache, ve->abs_path, &old_sz, &cached_mtime, NULL);
     struct stat st;
-    if (lstat(ve->abs_path, &st) != 0) return;
+    if (lstat(ve->abs_path, &st) != 0) return 0;
     if (!has_ce || st.st_mtime != cached_mtime) {
         char *cache_abs = path_join(root, CACHE_FILENAME);
-        unsigned long long sz = scan_dir_recursive(ve->abs_path, root, cache_abs, cache, NULL);
-        (void)sz;
+        // Use parallel scan even for hovered dir for speed
+        int threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        if (threads < 1) threads = 1; if (threads > 16) threads = 16;
+        (void)scan_dir_parallel_deep(ve->abs_path, cache_abs, cache, threads);
+        
         // compute delta and adjust ancestors + footer total
         unsigned long long new_sz = 0ULL;
         cache_get_info(cache, ve->abs_path, &new_sz, NULL, NULL);
@@ -1954,7 +1955,9 @@ static void maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
         cache_save(root, cache);
         free(cache_abs);
         if (cache_get_info(cache, ve->abs_path, &ve->size, NULL, NULL)) { ve->size_known = 1; }
+        return 1; // Rescanned
     }
+    return 0;
 }
 
 static void draw_status(const char *msg) {
@@ -3268,12 +3271,13 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         refresh();
 
         // Controllo differenze quando il cursore è su una cartella
-        maybe_rescan_hovered(&dv, root, &cache);
-        // ridisegna list dopo possibile aggiornamento
-        erase();
-        draw_header(root, current, &cache);
-        draw_list(&dv, top);
-        refresh();
+        if (maybe_rescan_hovered(&dv, root, &cache)) {
+            // ridisegna list dopo aggiornamento
+            erase();
+            draw_header(root, current, &cache);
+            draw_list(&dv, top);
+            refresh();
+        }
 
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;

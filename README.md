@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- Current version: 0.40.0
+- Current version: 0.41.0
 - License: MIT (suggested; adjust if different)
 
 ---
 
 ## Highlights
 
+- **Ultra-Fluid Scrolling**: Optimized TUI rendering engine with cached metrics, providing instant response even in directories with 100,000+ files.
 - **Sharded Cache**: Performance-optimized cache with 64 independent locks to minimize thread contention.
 - **Hard Link Detection**: Accurate disk usage calculation by counting unique (dev, ino) pairs only once.
 - **Iterative Operations**: Tree removal and copying are now iterative, supporting extremely deep directory structures without stack overflow.
@@ -20,6 +21,14 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
 
 ---
+
+## What’s new in 0.41.0
+
+- **Rendering Optimization**: Pre-calculated column widths and view totals to eliminate lag during scrolling.
+- **Improved Hover Checks**: `maybe_rescan_hovered` now uses parallel scanning and only triggers a redraw if changes are detected.
+- **TUI Controls**:
+  - `TAB / Ctrl-i`: Toggle the graphical occupation bar.
+- **Bugfixes**: Removed redundant draw calls in the main loop to save CPU cycles.
 
 ## What’s new in 0.40.0
 
