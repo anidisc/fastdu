@@ -1541,6 +1541,7 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
     attron(COLOR_PAIR(1));
     mvhline(0, 0, ' ', cols);
+    
     char relbuf[PATH_MAX];
     if (starts_with(cur, root)) {
         size_t lr = strlen(root);
@@ -1556,10 +1557,19 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     } else {
         snprintf(filterbuf, sizeof(filterbuf), "%s", filter_mode_label());
     }
-    char title[PATH_MAX + 256];
-    snprintf(title, sizeof(title), " fastdu - root: %s - cwd: %s - sort: %s - filter: %s  ", root, relbuf, sortbuf, filterbuf);
-    mvaddnstr(0, 0, title, cols-1);
-    attroff(COLOR_PAIR(1));
+
+    // Header drawing
+    move(0, 0);
+    attron(COLOR_PAIR(1)); addstr(" fastdu - root: ");
+    attron(COLOR_PAIR(8) | A_BOLD); addstr(root);
+    attron(COLOR_PAIR(1)); addstr(" - cwd: ");
+    attron(COLOR_PAIR(8) | A_BOLD); addstr(relbuf);
+    attron(COLOR_PAIR(1)); addstr(" - sort: ");
+    attron(COLOR_PAIR(8) | A_BOLD); addstr(sortbuf);
+    attron(COLOR_PAIR(1)); addstr(" - filter: ");
+    attron(COLOR_PAIR(8) | A_BOLD); addstr(filterbuf);
+    attron(COLOR_PAIR(1)); // Reset to default bar color for padding
+    attroff(COLOR_PAIR(8) | A_BOLD);
 
     attron(COLOR_PAIR(1));
     mvhline(rows-2, 0, ' ', cols);
@@ -1571,21 +1581,28 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         unsigned long long mt = compute_marked_total_bytes(cache);
         human_size(mt, markedbuf, sizeof(markedbuf));
     }
-    char footer[512];
-    if (g_search_query[0]) {
-        char qbuf[128];
-        snprintf(qbuf, sizeof(qbuf), " | query:%s", g_search_query);
-        if (g_marks.n > 0)
-            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s, %llu files)%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, (unsigned long long)marked_files_cached, qbuf);
-        else
-            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu%s ", (unsigned long long)g_last_files, totalbuf, g_marks.n, qbuf);
-    } else {
-        if (g_marks.n > 0)
-            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu (%s, %llu files) ", (unsigned long long)g_last_files, totalbuf, g_marks.n, markedbuf, (unsigned long long)marked_files_cached);
-        else
-            snprintf(footer, sizeof(footer), " h help | files:%llu | size:%s | marked:%zu ", (unsigned long long)g_last_files, totalbuf, g_marks.n);
+
+    // Footer drawing
+    move(rows-2, 0);
+    attron(COLOR_PAIR(1)); addstr(" h help | files: ");
+    attron(COLOR_PAIR(8) | A_BOLD); printw("%llu", (unsigned long long)g_last_files);
+    attron(COLOR_PAIR(1)); addstr(" | size: ");
+    attron(COLOR_PAIR(8) | A_BOLD); addstr(totalbuf);
+    attron(COLOR_PAIR(1)); addstr(" | marked: ");
+    attron(COLOR_PAIR(8) | A_BOLD); printw("%zu", g_marks.n);
+    if (g_marks.n > 0) {
+        attron(COLOR_PAIR(1)); addstr(" (");
+        attron(COLOR_PAIR(8) | A_BOLD); addstr(markedbuf);
+        attron(COLOR_PAIR(1)); addstr(", ");
+        attron(COLOR_PAIR(8) | A_BOLD); printw("%llu", (unsigned long long)marked_files_cached);
+        attron(COLOR_PAIR(1)); addstr(" files)");
     }
-    mvaddnstr(rows-2, 0, footer, cols-1);
+    if (g_search_query[0]) {
+        attron(COLOR_PAIR(1)); addstr(" | query: ");
+        attron(COLOR_PAIR(8) | A_BOLD); addstr(g_search_query);
+    }
+    attron(COLOR_PAIR(1)); // Reset
+    attroff(COLOR_PAIR(8) | A_BOLD);
     attroff(COLOR_PAIR(1));
 }
 
@@ -3144,6 +3161,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
             init_pair(5, COLOR_GREEN, -1);           // size small
             init_pair(6, COLOR_YELLOW, -1);          // size medium
             init_pair(7, COLOR_RED, -1);             // size large
+            init_pair(8, COLOR_YELLOW, COLOR_BLUE);  // highlights in header/footer (Yellow on Blue)
         }
     }
 
