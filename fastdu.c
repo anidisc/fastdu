@@ -1550,8 +1550,14 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         snprintf(relbuf, sizeof(relbuf), "%s", cur);
     }
     char sortbuf[32]; sort_label_with_order(sortbuf, sizeof(sortbuf));
+    char filterbuf[64];
+    if (g_filter_by_query) {
+        snprintf(filterbuf, sizeof(filterbuf), "%s+%s", filter_mode_label(), g_regex_enabled ? "regex" : "query");
+    } else {
+        snprintf(filterbuf, sizeof(filterbuf), "%s", filter_mode_label());
+    }
     char title[PATH_MAX + 256];
-    snprintf(title, sizeof(title), " fastdu - root: %s - cwd: %s - sort: %s - filter: %s  ", root, relbuf, sortbuf, filter_mode_label());
+    snprintf(title, sizeof(title), " fastdu - root: %s - cwd: %s - sort: %s - filter: %s  ", root, relbuf, sortbuf, filterbuf);
     mvaddnstr(0, 0, title, cols-1);
     attroff(COLOR_PAIR(1));
 
