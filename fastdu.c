@@ -3137,9 +3137,9 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     #ifdef NCURSES_VERSION
             use_default_colors();
     #endif
-            init_pair(1, COLOR_BLACK, COLOR_CYAN);   // header/footer
-            init_pair(2, COLOR_CYAN, -1);            // separators / accents
-            init_pair(3, COLOR_CYAN, -1);            // dirs (names)
+            init_pair(1, COLOR_BLACK, COLOR_BLUE);   // header/footer (Blue bar)
+            init_pair(2, COLOR_BLUE, -1);            // separators / accents (Blue)
+            init_pair(3, COLOR_CYAN, -1);            // dirs (Cyan names -> Cyan selection bar)
             init_pair(4, COLOR_WHITE, -1);           // files (names)
             init_pair(5, COLOR_GREEN, -1);           // size small
             init_pair(6, COLOR_YELLOW, -1);          // size medium
