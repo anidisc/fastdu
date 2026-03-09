@@ -21,6 +21,27 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Apertura file esterna:** Aggiungere un comando (es. `o`) per aprire il file selezionato con l'applicazione predefinita del sistema (usando `xdg-open` su Linux).
 - [x] **Supporto Mount-points:** Opzione per limitare la scansione al filesystem corrente (`-x` / `--one-file-system`), evitando di entrare in partizioni montate o dischi esterni.
 
+### 5. UX & Personalizzazione (Modernizzazione TUI)
+- [x] **Supporto Mouse:** Implementare lo scrolling con la rotellina e la selezione/apertura di directory tramite click (protocollo ncurses mouse).
+- [ ] **Breadcrumbs Navigabili:** Mostrare il percorso corrente in alto in modo più leggibile e permettere di saltare a cartelle superiori con un click (se il mouse è attivo).
+- [ ] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
+- [ ] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
+
+### 6. Motore & Performance (Ottimizzazione Core)
+- [ ] **Integrazione `io_uring`:** Su Linux, utilizzare `io_uring` per le operazioni di `stat` e `openat` per ridurre l'overhead delle syscall durante la scansione parallela.
+- [ ] **Scansione Differenziale Intelligente:** Implementare un sistema che monitora i cambiamenti del filesystem in background o verifica solo i path con `mtime` modificata rispetto alla cache.
+- [ ] **Log Errori Permessi:** Creare una vista dedicata per visualizzare i file/directory che non è stato possibile scansionare per problemi di permessi, evitando di saltarli silenziosamente.
+
+### 7. Analisi Avanzata & Intelligenza
+- [ ] **Rilevamento Duplicati:** Modalità per identificare file identici (stessa dimensione e hash) per suggerire la pulizia dello spazio.
+- [ ] **Visualizzazione ad Albero:** Aggiungere una modalità "Tree View" o "Treemap" testuale per avere una visione d'insieme della struttura del disco.
+- [ ] **Consapevolezza Git:** Opzione per ignorare automaticamente i file definiti nei `.gitignore` presenti nelle sottocartelle.
+
+### 8. Ecosistema & Estensioni
+- [ ] **Esplorazione Archivi:** Permettere di entrare nei file `.zip`, `.tar.gz` o `.7z` come se fossero directory normali per esplorarne il contenuto.
+- [ ] **Filesystem Remoti:** Supporto per la scansione e navigazione di server remoti tramite protocolli SSH/SFTP.
+- [ ] **Anteprime Grafiche:** Visualizzazione di anteprime immagini (tramite protocollo Sixel o Kitty) direttamente all'interno della TUI.
+
 ---
 
 ## 🛠 Correzioni e Ottimizzazioni (Bugfix & Refactoring)

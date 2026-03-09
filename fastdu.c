@@ -3139,6 +3139,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         cbreak();
         noecho();
         keypad(stdscr, TRUE);
+        mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
         curs_set(0);
         g_tui_active = 1;
         atexit(restore_terminal_on_exit);
@@ -3284,7 +3285,46 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;
-        else if (ch == 'h' || ch == 'H') {
+        else if (ch == KEY_MOUSE) {
+            MEVENT event;
+            if (getmouse(&event) == OK) {
+                int y_start = g_decorative ? 3 : 1;
+                int rows, cols; getmaxyx(stdscr, rows, cols);
+                int list_rows = rows - 3 - (g_decorative ? 2 : 0);
+                if (event.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED)) {
+                    if (event.y >= y_start && event.y < y_start + list_rows) {
+                        size_t clicked_idx = (size_t)(top + (event.y - y_start));
+                        if (clicked_idx < dv.n) {
+                            if (clicked_idx == dv.selected || (event.bstate & BUTTON1_DOUBLE_CLICKED)) {
+                                ViewEntry *ve = &dv.v[clicked_idx];
+                                if (ve->is_dir) {
+                                    navstack_push(&nav, current, ve->abs_path, dv.selected, top);
+                                    strncpy(current, ve->abs_path, sizeof(current)); current[sizeof(current)-1] = '\0';
+                                    view_free(&dv);
+                                    top = 0;
+                                    build_dir_view(current, root, &cache, &dv);
+                                }
+                            } else {
+                                dv.selected = clicked_idx;
+                            }
+                        }
+                    }
+                } else if (event.bstate & (BUTTON3_CLICKED | BUTTON3_PRESSED)) {
+                    // Right click: go back
+                    ungetch(KEY_LEFT);
+                } else if (event.bstate & 0x10000) { // Scroll Up (BUTTON4)
+                    if (top > 0) {
+                        top--;
+                        if ((int)dv.selected >= top + list_rows) dv.selected = (size_t)(top + list_rows - 1);
+                    }
+                } else if (event.bstate & 0x200000) { // Scroll Down (BUTTON5)
+                    if (top + list_rows < (int)dv.n) {
+                        top++;
+                        if ((int)dv.selected < top) dv.selected = (size_t)top;
+                    }
+                }
+            }
+        } else if (ch == 'h' || ch == 'H') {
             show_help();
         } else if (ch == KEY_UP || ch == 'k') {
             if (dv.selected > 0) dv.selected--;
