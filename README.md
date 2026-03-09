@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.45.0**
+- **Current version: 0.46.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Tree View Mode**: Toggle a hierarchical view of your directories (Press `A`).
 - **Full Mouse Support**: Selection, double-click to enter, right-click to go back, and scroll wheel support.
 - **Navigable Breadcrumbs**: Clickable path in the header for instant navigation to parent directories.
 - **Nerd Fonts Integration**: Visual icons for folders and files (requires a Nerd Font and `-nf` flag).
@@ -27,6 +28,12 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
 
 ---
+
+## What’s new in 0.46.0 (Hierarchical Exploration)
+
+- **Tree View**: Added a new mode to explore the filesystem hierarchy in-place. Press `A` to toggle.
+- **Expand/Collapse**: In tree mode, press `Enter` or click to expand/collapse directories.
+- **Visual Indentation**: Clear tree lines and +/- indicators for expanded nodes.
 
 ## What’s new in 0.45.0 (UX & Customization)
 
@@ -113,9 +120,10 @@ Produces the `./fastdu` binary.
 
 ## TUI cheat sheet
 
-- **Mouse**: Scroll wheel; Left-click (select/open); Right-click (back); Click header path to jump.
-- **Navigation**: Up/Down or j/k; Enter/Right (l) to enter; Backspace/Left to go up; `b`/`e` to jump to first/last
+- **Mouse**: Scroll wheel; Left-click (select/open/expand); Right-click (back); Click header path to jump.
+- **Navigation**: Up/Down or j/k; Enter/Right (l) to enter/expand; Backspace/Left to go up; `b`/`e` to jump to first/last
 - **Views**:
+  - `A`: Toggle Tree View mode
   - `E`: Open Extension Distribution view
   - `v`: Preview selected text file (Toggle wrap: `w`)
   - `O`: Open selected item with system default (`xdg-open`)

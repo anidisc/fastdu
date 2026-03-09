@@ -34,7 +34,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 
 ### 7. Analisi Avanzata & Intelligenza
 - [ ] **Rilevamento Duplicati:** Modalità per identificare file identici (stessa dimensione e hash) per suggerire la pulizia dello spazio.
-- [ ] **Visualizzazione ad Albero:** Aggiungere una modalità "Tree View" o "Treemap" testuale per avere una visione d'insieme della struttura del disco.
+- [x] **Visualizzazione ad Albero:** Aggiungere una modalità "Tree View" o "Treemap" testuale per avere una visione d'insieme della struttura del disco.
 - [ ] **Consapevolezza Git:** Opzione per ignorare automaticamente i file definiti nei `.gitignore` presenti nelle sottocartelle.
 
 ### 8. Ecosistema & Estensioni

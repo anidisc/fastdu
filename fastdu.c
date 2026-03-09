@@ -106,6 +106,8 @@ typedef struct {
     unsigned long long size;
     int size_known;
     time_t mtime;
+    int depth;    // depth in tree view
+    int expanded; // if dir is expanded in tree view
 } ViewEntry;
 
 typedef struct {
@@ -123,7 +125,9 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.45.0"
+#define FASTDU_VERSION "0.46.0"
+
+static int g_tree_mode = 0; // Tree view mode toggle
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -1342,7 +1346,122 @@ static int cmp_entries(const void *a, const void *b) {
  * files), and sorts according to current preferences.
  * Returns 0 on success, -1 if the directory cannot be opened.
  */
+// Tree View state
+typedef struct {
+    char **paths;
+    size_t n;
+    size_t cap;
+} ExpandedSet;
+
+static ExpandedSet g_expanded = {NULL, 0, 0};
+
+static void expanded_add(const char *p) {
+    for (size_t i = 0; i < g_expanded.n; i++) if (strcmp(g_expanded.paths[i], p) == 0) return;
+    if (g_expanded.n == g_expanded.cap) {
+        size_t nc = g_expanded.cap ? g_expanded.cap * 2 : 32;
+        char **np = realloc(g_expanded.paths, nc * sizeof(char*));
+        if (!np) return;
+        g_expanded.paths = np; g_expanded.cap = nc;
+    }
+    g_expanded.paths[g_expanded.n++] = xstrdup(p);
+}
+
+static void expanded_remove(const char *p) {
+    for (size_t i = 0; i < g_expanded.n; i++) {
+        if (strcmp(g_expanded.paths[i], p) == 0) {
+            free(g_expanded.paths[i]);
+            if (i < g_expanded.n - 1) memmove(&g_expanded.paths[i], &g_expanded.paths[i+1], (g_expanded.n - i - 1) * sizeof(char*));
+            g_expanded.n--; return;
+        }
+    }
+}
+
+static int expanded_has(const char *p) {
+    for (size_t i = 0; i < g_expanded.n; i++) if (strcmp(g_expanded.paths[i], p) == 0) return 1;
+    return 0;
+}
+
+static void build_tree_recursive(const char *path, const char *root, Cache *cache, DirView *out, int depth) {
+    DIR *dp = opendir(path);
+    if (!dp) return;
+    
+    // Temporarily collect entries to sort them
+    DirView tmp = {0};
+    tmp.path = xstrdup(path);
+    struct dirent *de;
+    while ((de = readdir(dp)) != NULL) {
+        if (is_dot_or_dotdot(de->d_name)) continue;
+        if (strcmp(de->d_name, CACHE_FILENAME) == 0 && strcmp(path, root) == 0) continue;
+        char *abs = path_join(path, de->d_name);
+        if (!abs) continue;
+        
+        struct stat st;
+        if (lstat(abs, &st) != 0) { free(abs); continue; }
+        if (S_ISLNK(st.st_mode)) { free(abs); continue; }
+        
+        int is_dir = S_ISDIR(st.st_mode);
+        int include = 1;
+        if (g_filter_mode == FILTER_DIRS && !is_dir) include = 0;
+        if (g_filter_mode == FILTER_FILES && is_dir) include = 0;
+        if (g_filter_by_query) {
+            if (g_regex_enabled) { if (regexec(&g_regex, de->d_name, 0, NULL, 0) != 0) include = 0; }
+            else { if (g_search_query[0] != '\0' && !strcasestr_bool(de->d_name, g_search_query)) include = 0; }
+        }
+        
+        if (!include) { free(abs); continue; }
+        
+        if (tmp.n == tmp.cap) {
+            size_t nc = tmp.cap ? tmp.cap * 2 : 64;
+            ViewEntry *nv = realloc(tmp.v, nc * sizeof(ViewEntry));
+            if (!nv) { free(abs); continue; }
+            tmp.v = nv; tmp.cap = nc;
+        }
+        ViewEntry *ve = &tmp.v[tmp.n++];
+        ve->name = xstrdup(de->d_name);
+        ve->abs_path = abs;
+        ve->is_dir = is_dir;
+        ve->mtime = st.st_mtime;
+        ve->depth = depth;
+        ve->expanded = expanded_has(abs);
+        if (ve->is_dir) {
+            if (!cache_get_info(cache, abs, &ve->size, NULL, NULL)) { ve->size = 0; ve->size_known = 0; }
+            else ve->size_known = 1;
+        } else {
+            ve->size = file_size_bytes(&st);
+            ve->size_known = 1;
+        }
+    }
+    closedir(dp);
+    qsort(tmp.v, tmp.n, sizeof(ViewEntry), cmp_entries);
+    
+    // Add sorted entries to main view and recurse if expanded
+    for (size_t i = 0; i < tmp.n; i++) {
+        if (out->n == out->cap) {
+            size_t nc = out->cap ? out->cap * 2 : 128;
+            ViewEntry *nv = realloc(out->v, nc * sizeof(ViewEntry));
+            if (!nv) break;
+            out->v = nv; out->cap = nc;
+        }
+        out->v[out->n++] = tmp.v[i];
+        if (tmp.v[i].is_dir && tmp.v[i].expanded) {
+            build_tree_recursive(tmp.v[i].abs_path, root, cache, out, depth + 1);
+        }
+    }
+    free(tmp.path); free(tmp.v); // don't free individual entries, they are now in 'out'
+}
+
 static int build_dir_view(const char *path, const char *root, Cache *cache, DirView *out) {
+    if (g_tree_mode) {
+        memset(out, 0, sizeof(*out));
+        out->path = xstrdup(path);
+        build_tree_recursive(path, root, cache, out, 0);
+        
+        out->sizew = compute_size_col_width(out);
+        out->view_total = 0;
+        for (size_t i = 0; i < out->n; i++) if (out->v[i].size_known && out->v[i].depth == 0) out->view_total += out->v[i].size;
+        if (out->view_total == 0) out->view_total = 1;
+        return 0;
+    }
     memset(out, 0, sizeof(*out));
     out->path = xstrdup(path);
     DIR *dp = opendir(path);
@@ -2042,15 +2161,28 @@ static void draw_list(const DirView *dv, int top) {
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
         // space after type only if non-decorative (in decorative mode, we place a vertical line)
         if (!g_decorative) mvaddch(y + i, type_col + 1, ' ');
-        // icon and name
+        // tree indentation and name
+        int indent = g_tree_mode ? (ve->depth * 2) : 0;
+        if (g_tree_mode && indent > 0) {
+            // Very simple tree lines
+            for (int k = 0; k < indent - 2; k++) mvaddch(y + i, name_col + k, ' ');
+            mvaddstr(y + i, name_col + indent - 2, "└ ");
+        }
+
         const char *icon = get_icon(ve->name, ve->is_dir);
-        int icon_w = g_use_nerd_fonts ? 3 : 0; // glifo (wide) + space
-        if (g_use_nerd_fonts) mvaddstr(y + i, name_col, icon);
+        int icon_w = g_use_nerd_fonts ? 3 : 0;
+        if (g_use_nerd_fonts) mvaddstr(y + i, name_col + indent, icon);
         
         if (ve->is_dir) attron(A_BOLD);
-        int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - icon_w - 1) : (info_col - name_col - icon_w - 1);
+        if (g_tree_mode && ve->is_dir) {
+            mvaddch(y + i, name_col + indent + icon_w, ve->expanded ? '-' : '+');
+            mvaddch(y + i, name_col + indent + icon_w + 1, ' ');
+            indent += 2;
+        }
+
+        int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - indent - icon_w - 1) : (info_col - name_col - indent - icon_w - 1);
         if (name_max < 0) name_max = 0;
-        draw_truncated_name(y + i, name_col + icon_w, ve->name, name_max);
+        draw_truncated_name(y + i, name_col + indent + icon_w, ve->name, name_max);
         if (ve->is_dir) attroff(A_BOLD);
         // left vertical separator between type and name (after drawing type and name)
         if (g_decorative) {
@@ -3538,7 +3670,12 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;
-        else if (ch == KEY_MOUSE) {
+        else if (ch == 'a' || ch == 'A') {
+            g_tree_mode = !g_tree_mode;
+            view_free(&dv);
+            top = 0;
+            build_dir_view(current, root, &cache, &dv);
+        } else if (ch == KEY_MOUSE) {
             MEVENT event;
             if (getmouse(&event) == OK) {
                 int y_start = g_decorative ? 3 : 1;
@@ -3605,12 +3742,21 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
                 if (ve->is_dir) {
-                    // Push parent nav state before changing directory
-                    navstack_push(&nav, current, ve->abs_path, dv.selected, top);
-                    strncpy(current, ve->abs_path, sizeof(current)); current[sizeof(current)-1] = '\0';
-                    view_free(&dv);
-                    top = 0;
-                    build_dir_view(current, root, &cache, &dv);
+                    if (g_tree_mode) {
+                        if (ve->expanded) expanded_remove(ve->abs_path);
+                        else expanded_add(ve->abs_path);
+                        size_t sel = dv.selected; int old_top = top;
+                        view_free(&dv);
+                        build_dir_view(current, root, &cache, &dv);
+                        dv.selected = sel; top = old_top;
+                    } else {
+                        // Push parent nav state before changing directory
+                        navstack_push(&nav, current, ve->abs_path, dv.selected, top);
+                        strncpy(current, ve->abs_path, sizeof(current)); current[sizeof(current)-1] = '\0';
+                        view_free(&dv);
+                        top = 0;
+                        build_dir_view(current, root, &cache, &dv);
+                    }
                 }
             }
         } else if (ch == 'b' || ch == 'B') {
