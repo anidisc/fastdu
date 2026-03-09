@@ -60,6 +60,11 @@
 #include <signal.h>
 #include <regex.h>
 #include <pwd.h>
+#ifdef __linux__
+#include <linux/stat.h>
+#include <liburing.h>
+#define HAS_IO_URING 1
+#endif
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -2909,10 +2914,23 @@ static void finalize_task(DirTask *t) {
  * subdirectories (openat + enqueue_child). Skips symlinks and the cache
  * file at the root. Finally calls finalize_task.
  */
+#ifdef HAS_IO_URING
+struct io_uring_context {
+    struct io_uring ring;
+    int active;
+};
+static _Thread_local struct io_uring_context g_uring = { .active = 0 };
+
+struct async_stat_batch {
+    char name[256];
+    struct statx stx;
+    int active;
+};
+#endif
+
 static void process_task(DirTask *t) {
     int dupfd = dup(t->dirfd);
     if (dupfd < 0) {
-        // Cannot process: mark processing phase done and finalize
         if (atomic_fetch_sub(&t->pending, 1) == 1) {
             if (!tq_push_timed(t->finalq, t, 2000)) finalize_task(t);
         }
@@ -2926,6 +2944,13 @@ static void process_task(DirTask *t) {
         }
         return;
     }
+
+#ifdef HAS_IO_URING
+    #define URING_BATCH 64
+    struct async_stat_batch batch[URING_BATCH];
+    int batch_count = 0;
+#endif
+
     struct dirent *de;
     while ((de = readdir(dp)) != NULL) {
         if (g_interrupted) break;
@@ -2937,30 +2962,72 @@ static void process_task(DirTask *t) {
         }
         unsigned char dt = de->d_type;
         if (dt == DT_LNK) continue;
-            if (dt == DT_UNKNOWN) {
-            struct stat st0;
-            if (fstatat(t->dirfd, de->d_name, &st0, AT_SYMLINK_NOFOLLOW) != 0) continue;
-            if (S_ISLNK(st0.st_mode)) continue;
-            if (S_ISDIR(st0.st_mode)) dt = DT_DIR; else if (S_ISREG(st0.st_mode)) dt = DT_REG;
-            if (dt == DT_REG) {
-                if (st0.st_nlink <= 1 || !inodeset_check_and_add(t->is, st0.st_dev, st0.st_ino)) {
-                    unsigned long long b = file_size_bytes(&st0);
-                    atomic_fetch_add(&t->files_size, b);
-                    atomic_fetch_add(&g_total_files, 1ULL);
-                    atomic_fetch_add(&g_total_bytes, b);
+
+#ifdef HAS_IO_URING
+        if (g_uring.active && (dt == DT_REG || dt == DT_UNKNOWN)) {
+            struct io_uring_sqe *sqe = io_uring_get_sqe(&g_uring.ring);
+            if (sqe) {
+                batch[batch_count].active = 1;
+                strncpy(batch[batch_count].name, de->d_name, 255);
+                batch[batch_count].name[255] = '\0';
+                io_uring_prep_statx(sqe, t->dirfd, batch[batch_count].name, AT_SYMLINK_NOFOLLOW, STATX_SIZE | STATX_TYPE | STATX_INO, &batch[batch_count].stx);
+                io_uring_sqe_set_data(sqe, &batch[batch_count]);
+                batch_count++;
+                if (batch_count == URING_BATCH) {
+                    io_uring_submit_and_wait(&g_uring.ring, batch_count);
+                    struct io_uring_cqe *cqe;
+                    unsigned head;
+                    int count = 0;
+                    io_uring_for_each_cqe(&g_uring.ring, head, cqe) {
+                        count++;
+                        if (cqe->res == 0) {
+                            struct async_stat_batch *data = (struct async_stat_batch *)io_uring_cqe_get_data(cqe);
+                            if (S_ISREG(data->stx.stx_mode)) {
+                                if (data->stx.stx_nlink <= 1 || !inodeset_check_and_add(t->is, (dev_t)((unsigned long)data->stx.stx_dev_major << 32 | data->stx.stx_dev_minor), data->stx.stx_ino)) {
+                                    unsigned long long b = data->stx.stx_size;
+                                    if (g_accuracy_mode) b = data->stx.stx_blocks * 512ULL;
+                                    atomic_fetch_add(&t->files_size, b);
+                                    atomic_fetch_add(&g_total_files, 1ULL);
+                                    atomic_fetch_add(&g_total_bytes, b);
+                                }
+                            } else if (S_ISDIR(data->stx.stx_mode)) {
+                                int cfd = openat(t->dirfd, data->name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                                if (cfd >= 0) {
+                                    if (g_one_file_system) {
+                                        struct stat stch;
+                                        if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) { close(cfd); }
+                                        else { enqueue_child(t, cfd, data->name); }
+                                    } else { enqueue_child(t, cfd, data->name); }
+                                }
+                            }
+                        }
+                    }
+                    io_uring_cq_advance(&g_uring.ring, count);
+                    batch_count = 0;
                 }
+                continue;
             }
-        } else if (dt == DT_REG) {
+        }
+#endif
+
+        if (dt == DT_REG || dt == DT_UNKNOWN) {
             struct stat stf;
             if (fstatat(t->dirfd, de->d_name, &stf, AT_SYMLINK_NOFOLLOW) == 0) {
-                if (stf.st_nlink <= 1 || !inodeset_check_and_add(t->is, stf.st_dev, stf.st_ino)) {
-                    unsigned long long b = file_size_bytes(&stf);
-                    atomic_fetch_add(&t->files_size, b);
-                    atomic_fetch_add(&g_total_files, 1ULL);
-                    atomic_fetch_add(&g_total_bytes, b);
+                if (S_ISLNK(stf.st_mode)) continue;
+                if (S_ISREG(stf.st_mode)) {
+                    if (stf.st_nlink <= 1 || !inodeset_check_and_add(t->is, stf.st_dev, stf.st_ino)) {
+                        unsigned long long b = file_size_bytes(&stf);
+                        atomic_fetch_add(&t->files_size, b);
+                        atomic_fetch_add(&g_total_files, 1ULL);
+                        atomic_fetch_add(&g_total_bytes, b);
+                    }
+                } else if (S_ISDIR(stf.st_mode)) {
+                    dt = DT_DIR;
                 }
             }
-        } else if (dt == DT_DIR) {
+        }
+        
+        if (dt == DT_DIR) {
             int cfd = openat(t->dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (cfd >= 0) {
                 if (g_one_file_system) {
@@ -2974,10 +3041,43 @@ static void process_task(DirTask *t) {
             }
         }
     }
+
+#ifdef HAS_IO_URING
+    if (batch_count > 0) {
+        io_uring_submit_and_wait(&g_uring.ring, batch_count);
+        struct io_uring_cqe *cqe;
+        unsigned head;
+        int count = 0;
+        io_uring_for_each_cqe(&g_uring.ring, head, cqe) {
+            count++;
+            if (cqe->res == 0) {
+                struct async_stat_batch *data = (struct async_stat_batch *)io_uring_cqe_get_data(cqe);
+                if (S_ISREG(data->stx.stx_mode)) {
+                    if (data->stx.stx_nlink <= 1 || !inodeset_check_and_add(t->is, (dev_t)((unsigned long)data->stx.stx_dev_major << 32 | data->stx.stx_dev_minor), data->stx.stx_ino)) {
+                        unsigned long long b = data->stx.stx_size;
+                        if (g_accuracy_mode) b = data->stx.stx_blocks * 512ULL;
+                        atomic_fetch_add(&t->files_size, b);
+                        atomic_fetch_add(&g_total_files, 1ULL);
+                        atomic_fetch_add(&g_total_bytes, b);
+                    }
+                } else if (S_ISDIR(data->stx.stx_mode)) {
+                    int cfd = openat(t->dirfd, data->name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                    if (cfd >= 0) {
+                        if (g_one_file_system) {
+                            struct stat stch;
+                            if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) { close(cfd); }
+                            else { enqueue_child(t, cfd, data->name); }
+                        } else { enqueue_child(t, cfd, data->name); }
+                    }
+                }
+            }
+        }
+        io_uring_cq_advance(&g_uring.ring, count);
+    }
+#endif
+
     closedir(dp);
-    // Mark this task's processing phase done; enqueue for finalization if pending reaches zero
     if (atomic_fetch_sub(&t->pending, 1) == 1) {
-        // Try to enqueue for finalization; if queue is saturated and doesn't free within 2s, finalize inline
         if (!tq_push_timed(t->finalq, t, 2000)) {
             finalize_task(t);
         }
@@ -2996,6 +3096,11 @@ typedef struct {
 
 static void *worker_loop(void *arg) {
     ScanPool *p = (ScanPool*)arg;
+#ifdef HAS_IO_URING
+    if (io_uring_queue_init(256, &g_uring.ring, 0) == 0) {
+        g_uring.active = 1;
+    }
+#endif
     for (;;) {
         DirTask *t = (DirTask*)tq_pop(&p->q);
         if (!t) break;
@@ -3003,6 +3108,12 @@ static void *worker_loop(void *arg) {
         process_task(t);
         atomic_fetch_sub(&g_active_workers, 1);
     }
+#ifdef HAS_IO_URING
+    if (g_uring.active) {
+        io_uring_queue_exit(&g_uring.ring);
+        g_uring.active = 0;
+    }
+#endif
     return NULL;
 }
 

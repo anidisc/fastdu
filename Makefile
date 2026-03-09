@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -O2 -Wall -Wextra -pedantic -std=c11 $(EXTRA_CFLAGS)
-LDFLAGS = -lncursesw -lpthread
+LDFLAGS = -lncursesw -lpthread -luring
 TARGET = fastdu
 SRC = fastdu.c
 

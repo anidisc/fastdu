@@ -28,7 +28,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
 
 ### 6. Motore & Performance (Ottimizzazione Core)
-- [ ] **Integrazione `io_uring`:** Su Linux, utilizzare `io_uring` per le operazioni di `stat` e `openat` per ridurre l'overhead delle syscall durante la scansione parallela.
+- [x] **Integrazione `io_uring`:** Su Linux, utilizzare `io_uring` per le operazioni di `stat` e `openat` per ridurre l'overhead delle syscall durante la scansione parallela.
 - [ ] **Scansione Differenziale Intelligente:** Implementare un sistema che monitora i cambiamenti del filesystem in background o verifica solo i path con `mtime` modificata rispetto alla cache.
 - [ ] **Log Errori Permessi:** Creare una vista dedicata per visualizzare i file/directory che non è stato possibile scansionare per problemi di permessi, evitando di saltarli silenziosamente.
 
