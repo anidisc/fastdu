@@ -118,7 +118,7 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.44.0"
+#define FASTDU_VERSION "0.45.0"
 
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
@@ -134,6 +134,7 @@ static void print_cli_usage(void) {
     printf("  -e PAT, --exclude PAT Exclude files/dirs matching exact PAT\n");
     printf("  --export FMT FILE    Export results to FILE in FMT (json|csv) and exit\n");
     printf("  -D, --decorative     Decorative UI (column headers, vertical separator, extra colors)\n");
+    printf("  -nf, --nerd-fonts    Enable Nerd Fonts icons support (requires compatible font)\n");
     printf("  -j N, --jobs N       Number of worker threads (default: CPUs, max 64)\n\n");
     printf("Examples:\n");
     printf("  fastdu                 # open TUI on current directory\n");
@@ -161,7 +162,95 @@ static int g_accuracy_mode = 0; // when set, compute disk usage using st_blocks 
 static int g_decorative = 0;    // decorative UI: separators, header bar, extra colors
 static int g_one_file_system = 0;
 static int g_show_graph = 1;
+static int g_use_nerd_fonts = 0; // Nerd Fonts icons support
 static dev_t g_root_dev = 0;
+
+typedef struct {
+    short pairs[9][2]; // [pair_id][fg, bg]
+    int keys[256];     // mappatura tasti custom
+} AppConfig;
+
+static AppConfig g_config;
+
+static short parse_color(const char *name) {
+    if (strcasecmp(name, "black") == 0) return COLOR_BLACK;
+    if (strcasecmp(name, "red") == 0) return COLOR_RED;
+    if (strcasecmp(name, "green") == 0) return COLOR_GREEN;
+    if (strcasecmp(name, "yellow") == 0) return COLOR_YELLOW;
+    if (strcasecmp(name, "blue") == 0) return COLOR_BLUE;
+    if (strcasecmp(name, "magenta") == 0) return COLOR_MAGENTA;
+    if (strcasecmp(name, "cyan") == 0) return COLOR_CYAN;
+    if (strcasecmp(name, "white") == 0) return COLOR_WHITE;
+    return -1; // default/transparent
+}
+
+static void load_default_config(void) {
+    // Default Color Pairs
+    g_config.pairs[1][0] = COLOR_BLACK;  g_config.pairs[1][1] = COLOR_BLUE;   // header
+    g_config.pairs[2][0] = COLOR_BLUE;   g_config.pairs[2][1] = -1;           // accent
+    g_config.pairs[3][0] = COLOR_CYAN;   g_config.pairs[3][1] = -1;           // dirs
+    g_config.pairs[4][0] = COLOR_WHITE;  g_config.pairs[4][1] = -1;           // files
+    g_config.pairs[5][0] = COLOR_GREEN;  g_config.pairs[5][1] = -1;           // size small
+    g_config.pairs[6][0] = COLOR_YELLOW; g_config.pairs[6][1] = -1;           // size med
+    g_config.pairs[7][0] = COLOR_RED;    g_config.pairs[7][1] = -1;           // size large
+    g_config.pairs[8][0] = COLOR_YELLOW; g_config.pairs[8][1] = COLOR_BLUE;   // highlight
+}
+
+static void load_config_file(void) {
+    load_default_config();
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/.config/fastdu/config.toml", home);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '[' || line[0] == '\n') continue;
+        char key[128], val[128];
+        if (sscanf(line, "%127s = %127s", key, val) == 2) {
+            // Rimuovi eventuali virgolette dai valori stringa
+            if (val[0] == '"') {
+                size_t len = strlen(val);
+                if (val[len-1] == '"') val[len-1] = '\0';
+                memmove(val, val + 1, len);
+            }
+            
+            if (strcmp(key, "header_fg") == 0) g_config.pairs[1][0] = parse_color(val);
+            else if (strcmp(key, "header_bg") == 0) g_config.pairs[1][1] = parse_color(val);
+            else if (strcmp(key, "accent_fg") == 0) g_config.pairs[2][0] = parse_color(val);
+            else if (strcmp(key, "dir_fg") == 0)    g_config.pairs[3][0] = parse_color(val);
+            else if (strcmp(key, "file_fg") == 0)   g_config.pairs[4][0] = parse_color(val);
+            else if (strcmp(key, "size_s_fg") == 0) g_config.pairs[5][0] = parse_color(val);
+            else if (strcmp(key, "size_m_fg") == 0) g_config.pairs[6][0] = parse_color(val);
+            else if (strcmp(key, "size_l_fg") == 0) g_config.pairs[7][0] = parse_color(val);
+        }
+    }
+    fclose(f);
+}
+
+static const char *get_icon(const char *name, int is_dir) {
+    if (!g_use_nerd_fonts) return "";
+    if (is_dir) return " "; // Folder icon
+    
+    const char *dot = strrchr(name, '.');
+    if (!dot) return " "; // Default file icon
+    
+    if (strcasecmp(dot, ".c") == 0 || strcasecmp(dot, ".h") == 0) return " ";
+    if (strcasecmp(dot, ".py") == 0) return " ";
+    if (strcasecmp(dot, ".js") == 0 || strcasecmp(dot, ".ts") == 0) return " ";
+    if (strcasecmp(dot, ".html") == 0 || strcasecmp(dot, ".css") == 0) return " ";
+    if (strcasecmp(dot, ".md") == 0) return " ";
+    if (strcasecmp(dot, ".json") == 0 || strcasecmp(dot, ".yaml") == 0 || strcasecmp(dot, ".yml") == 0) return " ";
+    if (strcasecmp(dot, ".pdf") == 0) return " ";
+    if (strcasecmp(dot, ".jpg") == 0 || strcasecmp(dot, ".jpeg") == 0 || strcasecmp(dot, ".png") == 0 || strcasecmp(dot, ".gif") == 0) return " ";
+    if (strcasecmp(dot, ".zip") == 0 || strcasecmp(dot, ".tar") == 0 || strcasecmp(dot, ".gz") == 0 || strcasecmp(dot, ".7z") == 0) return " ";
+    if (strcasecmp(dot, ".mp3") == 0 || strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".flac") == 0) return " ";
+    if (strcasecmp(dot, ".mp4") == 0 || strcasecmp(dot, ".mkv") == 0 || strcasecmp(dot, ".avi") == 0) return " ";
+    
+    return " "; // Default file icon
+}
 
 static char *xstrdup(const char *s) {
     if (!s) return NULL;
@@ -1087,6 +1176,31 @@ typedef struct {
     size_t cap;
 } MarkSet;
 
+// Breadcrumb tracking for mouse interaction
+typedef struct {
+    int x_start;
+    int x_end;
+    char *abs_path;
+} BreadcrumbSegment;
+
+#define MAX_BREADCRUMBS 64
+static BreadcrumbSegment g_breadcrumbs[MAX_BREADCRUMBS];
+static int g_num_breadcrumbs = 0;
+
+static void breadcrumbs_clear(void) {
+    for (int i = 0; i < g_num_breadcrumbs; i++) free(g_breadcrumbs[i].abs_path);
+    g_num_breadcrumbs = 0;
+}
+
+static void breadcrumbs_add(int x_start, int x_end, const char *abs_path) {
+    if (g_num_breadcrumbs < MAX_BREADCRUMBS) {
+        g_breadcrumbs[g_num_breadcrumbs].x_start = x_start;
+        g_breadcrumbs[g_num_breadcrumbs].x_end = x_end;
+        g_breadcrumbs[g_num_breadcrumbs].abs_path = xstrdup(abs_path);
+        g_num_breadcrumbs++;
+    }
+}
+
 // Forward declaration needed for markset normalization helpers
 static int path_is_parent_of(const char *parent, const char *child);
 
@@ -1563,7 +1677,33 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     attron(COLOR_PAIR(1)); addstr(" fastdu - root: ");
     attron(COLOR_PAIR(8) | A_BOLD); addstr(root);
     attron(COLOR_PAIR(1)); addstr(" - cwd: ");
-    attron(COLOR_PAIR(8) | A_BOLD); addstr(relbuf);
+    int cx, cy; getyx(stdscr, cy, cx);
+    breadcrumbs_clear();
+    // Use relbuf to draw clickable segments
+    char temp[PATH_MAX]; strncpy(temp, relbuf, sizeof(temp)); temp[sizeof(temp)-1] = '\0';
+    if (strcmp(temp, ".") == 0) {
+        attron(COLOR_PAIR(8) | A_BOLD); addstr(".");
+        int ex; getyx(stdscr, cy, ex);
+        breadcrumbs_add(cx, ex, root);
+    } else {
+        char *tok = strtok(temp, "/");
+        char current_abs[PATH_MAX]; strncpy(current_abs, root, sizeof(current_abs));
+        int first = 1;
+        while (tok) {
+            if (!first) { attron(COLOR_PAIR(1)); addstr("/"); cx++; }
+            char *next_abs = path_join(current_abs, tok);
+            if (!next_abs) break;
+            strncpy(current_abs, next_abs, sizeof(current_abs));
+            free(next_abs);
+            attron(COLOR_PAIR(8) | A_BOLD); addstr(tok);
+            int ex; getyx(stdscr, cy, ex);
+            breadcrumbs_add(cx, ex, current_abs);
+            cx = ex;
+            tok = strtok(NULL, "/");
+            first = 0;
+        }
+    }
+    attron(COLOR_PAIR(1)); // Reset to default bar color for padding
     attron(COLOR_PAIR(1)); addstr(" - sort: ");
     attron(COLOR_PAIR(8) | A_BOLD); addstr(sortbuf);
     attron(COLOR_PAIR(1)); addstr(" - filter: ");
@@ -1897,11 +2037,15 @@ static void draw_list(const DirView *dv, int top) {
         mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
         // space after type only if non-decorative (in decorative mode, we place a vertical line)
         if (!g_decorative) mvaddch(y + i, type_col + 1, ' ');
-        // name uses remaining space up to right column - 1 (or full width if hidden)
+        // icon and name
+        const char *icon = get_icon(ve->name, ve->is_dir);
+        int icon_w = g_use_nerd_fonts ? 3 : 0; // glifo (wide) + space
+        if (g_use_nerd_fonts) mvaddstr(y + i, name_col, icon);
+        
         if (ve->is_dir) attron(A_BOLD);
-        int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - 1) : (info_col - name_col - 1);
+        int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - icon_w - 1) : (info_col - name_col - icon_w - 1);
         if (name_max < 0) name_max = 0;
-        draw_truncated_name(y + i, name_col, ve->name, name_max);
+        draw_truncated_name(y + i, name_col + icon_w, ve->name, name_max);
         if (ve->is_dir) attroff(A_BOLD);
         // left vertical separator between type and name (after drawing type and name)
         if (g_decorative) {
@@ -3082,6 +3226,8 @@ int main(int argc, char **argv) {
             g_one_file_system = 1;
         } else if (strcmp(argv[i], "-D") == 0 || strcmp(argv[i], "--decorative") == 0) {
             g_decorative = 1;
+        } else if (strcmp(argv[i], "-nf") == 0 || strcmp(argv[i], "--nerd-fonts") == 0) {
+            g_use_nerd_fonts = 1;
         } else {
             path_arg = argv[i];
         }
@@ -3135,6 +3281,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     // TTY / headless setup
     if (!headless) {
         // TUI setup early to show progress
+        load_config_file();
         initscr();
         cbreak();
         noecho();
@@ -3155,14 +3302,9 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     #ifdef NCURSES_VERSION
             use_default_colors();
     #endif
-            init_pair(1, COLOR_BLACK, COLOR_BLUE);   // header/footer (Blue bar)
-            init_pair(2, COLOR_BLUE, -1);            // separators / accents (Blue)
-            init_pair(3, COLOR_CYAN, -1);            // dirs (Cyan names -> Cyan selection bar)
-            init_pair(4, COLOR_WHITE, -1);           // files (names)
-            init_pair(5, COLOR_GREEN, -1);           // size small
-            init_pair(6, COLOR_YELLOW, -1);          // size medium
-            init_pair(7, COLOR_RED, -1);             // size large
-            init_pair(8, COLOR_YELLOW, COLOR_BLUE);  // highlights in header/footer (Yellow on Blue)
+            for (int i = 1; i <= 8; i++) {
+                init_pair((short)i, g_config.pairs[i][0], g_config.pairs[i][1]);
+            }
         }
     }
 
@@ -3292,7 +3434,21 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                 int rows, cols; getmaxyx(stdscr, rows, cols);
                 int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 if (event.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED)) {
-                    if (event.y >= y_start && event.y < y_start + list_rows) {
+                    if (event.y == 0) {
+                        // Check breadcrumbs
+                        for (int i = 0; i < g_num_breadcrumbs; i++) {
+                            if (event.x >= g_breadcrumbs[i].x_start && event.x < g_breadcrumbs[i].x_end) {
+                                if (strcmp(g_breadcrumbs[i].abs_path, current) != 0) {
+                                    strncpy(current, g_breadcrumbs[i].abs_path, sizeof(current));
+                                    current[sizeof(current)-1] = '\0';
+                                    view_free(&dv);
+                                    top = 0;
+                                    build_dir_view(current, root, &cache, &dv);
+                                }
+                                break;
+                            }
+                        }
+                    } else if (event.y >= y_start && event.y < y_start + list_rows) {
                         size_t clicked_idx = (size_t)(top + (event.y - y_start));
                         if (clicked_idx < dv.n) {
                             if (clicked_idx == dv.selected || (event.bstate & BUTTON1_DOUBLE_CLICKED)) {

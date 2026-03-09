@@ -23,9 +23,9 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 
 ### 5. UX & Personalizzazione (Modernizzazione TUI)
 - [x] **Supporto Mouse:** Implementare lo scrolling con la rotellina e la selezione/apertura di directory tramite click (protocollo ncurses mouse).
-- [ ] **Breadcrumbs Navigabili:** Mostrare il percorso corrente in alto in modo più leggibile e permettere di saltare a cartelle superiori con un click (se il mouse è attivo).
-- [ ] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
-- [ ] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
+- [x] **Breadcrumbs Navigabili:** Mostrare il percorso corrente in alto in modo più leggibile e permettere di saltare a cartelle superiori con un click (se il mouse è attivo).
+- [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
+- [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
 
 ### 6. Motore & Performance (Ottimizzazione Core)
 - [ ] **Integrazione `io_uring`:** Su Linux, utilizzare `io_uring` per le operazioni di `stat` e `openat` per ridurre l'overhead delle syscall durante la scansione parallela.
