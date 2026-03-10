@@ -2,13 +2,15 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.46.0**
+- **Current version: 0.48.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Snapshot Comparison (Diff Mode)**: Compare your current disk usage against a reference baseline (Press `Y`).
+- **Theme Presets**: Switch between Dracula, Tokyo Night, Pastel, Light, and Dark themes (Press `K`).
 - **Tree View Mode**: Toggle a hierarchical view of your directories (Press `A`).
 - **Full Mouse Support**: Selection, double-click to enter, right-click to go back, and scroll wheel support.
 - **Navigable Breadcrumbs**: Clickable path in the header for instant navigation to parent directories.
@@ -28,6 +30,19 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
 
 ---
+
+## What’s new in 0.48.0 (Snapshot Comparison & Themes)
+
+### 📊 Snapshot Comparison (Diff Mode)
+Analyze how your disk usage has changed over time.
+- **Online Baseline**: Press `Y` to take an instant snapshot of the current state. From that point on, all deletions, moves, or rescans will show the **relative delta** (e.g., `+1.2 GiB` or `-500 MiB`).
+- **Offline Comparison**: Compare with a previous cache file using the `--diff <file>` flag.
+- **Visual Feedback**: Increases are shown in **Red**, decreases in **Green**, and unchanged items in default colors. An indicator `DIFF` appears in the footer.
+
+### 🎨 Theme Presets
+Instantly change the look of the TUI.
+- **Cycle Themes**: Press `K` to cycle through built-in presets: *Dark*, *Dracula*, *Tokyo Night*, *Light*, and *Pastel*.
+- **Persistence**: Set your favorite theme in the config file (`theme = "tokyonight"`).
 
 ## What’s new in 0.46.0 (Hierarchical Exploration)
 
@@ -110,6 +125,7 @@ Produces the `./fastdu` binary.
 - `-ac, --accuracy`      Accurate disk usage: force deep rescan and use allocated blocks
 - `-x, --one-file-system` Stay on the same file system (do not cross mount points)
 - `-e PAT, --exclude PAT` Exclude files/dirs matching exact PAT
+- `--diff FILE`          Compare current sizes with snapshot FILE
 - `--export FMT FILE`    Export results to FILE in FMT (json|csv) and exit
 - `-D, --decorative`     Decorative UI (column headers, vertical separator, extra colors)
 - `-j N, --jobs N`       Number of worker threads (default: online CPUs, max 64)
@@ -125,6 +141,8 @@ Produces the `./fastdu` binary.
 - **Views**:
   - `A`: Toggle Tree View mode
   - `E`: Open Extension Distribution view
+  - `K`: Cycle built-in theme presets
+  - `Y`: Toggle Baseline Snapshot (Diff Mode)
   - `v`: Preview selected text file (Toggle wrap: `w`)
   - `O`: Open selected item with system default (`xdg-open`)
 - **Sorting**: `o` toggles sort key (size → name → mtime), `s` toggles order (asc/desc)

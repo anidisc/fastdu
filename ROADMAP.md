@@ -15,7 +15,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 
 ### 3. Esportazione Dati
 - [x] **Export JSON/CSV:** Permettere il salvataggio dei risultati della scansione in formati strutturati per analisi esterne o reportistica.
-- [ ] **Snapshot Comparison:** Funzione per confrontare due file di cache diversi e mostrare dove lo spazio è aumentato o diminuito nel tempo.
+- [x] **Snapshot Comparison:** Funzione per confrontare la cache attuale con un riferimento (da file o istantaneo in memoria) per mostrare variazioni di spazio.
 
 ### 4. Integrazione di Sistema
 - [x] **Apertura file esterna:** Aggiungere un comando (es. `o`) per aprire il file selezionato con l'applicazione predefinita del sistema (usando `xdg-open` su Linux).

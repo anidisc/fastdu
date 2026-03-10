@@ -126,7 +126,7 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.47.0"
+#define FASTDU_VERSION "0.48.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
