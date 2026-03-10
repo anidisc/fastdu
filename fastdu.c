@@ -1347,12 +1347,13 @@ static void view_free(DirView *dv) {
 }
 
 // Global sort mode
-typedef enum { SORT_SIZE = 0, SORT_NAME = 1, SORT_MTIME = 2 } SortMode;
+typedef enum { SORT_SIZE = 0, SORT_NAME = 1, SORT_MTIME = 2, SORT_DELTA = 3 } SortMode;
 static SortMode g_sort_mode = SORT_SIZE;
 static const char *sort_mode_label(void) {
     switch (g_sort_mode) {
         case SORT_NAME: return "name";
         case SORT_MTIME: return "mtime";
+        case SORT_DELTA: return "delta";
         default: return "size";
     }
 }
@@ -1413,6 +1414,15 @@ static int cmp_entries(const void *a, const void *b) {
         }
         if (g_sort_desc) return (ea->mtime < eb->mtime) ? 1 : -1; // newer first
         else return (ea->mtime < eb->mtime) ? -1 : 1; // older first
+    } else if (g_sort_mode == SORT_DELTA) {
+        // sort by size delta; larger delta (more positive) first if desc
+        if (ea->delta == eb->delta) {
+            // stable tie-breaker by name
+            int c = strcmp(ea->name, eb->name);
+            return g_sort_desc ? -c : c;
+        }
+        if (g_sort_desc) return (ea->delta < eb->delta) ? 1 : -1;
+        else return (ea->delta < eb->delta) ? -1 : 1;
     } else {
         // pure size with asc/desc toggle; unknown sizes last
         if (ea->size_known != eb->size_known) return eb->size_known - ea->size_known; // known first
@@ -2174,6 +2184,7 @@ static void draw_list(const DirView *dv, int top) {
         // Build dynamic titles
         char size_title[16];
         if (g_display_mode == DISP_PCT) snprintf(size_title, sizeof(size_title), "Size(%%)");
+        else if (g_diff_mode) snprintf(size_title, sizeof(size_title), "Delta");
         else snprintf(size_title, sizeof(size_title), "Size");
         char info_title[24];
         if (g_info_col_mode == INFOCOL_MTIME) snprintf(info_title, sizeof(info_title), "Info(mtime)");
@@ -2541,7 +2552,7 @@ static void show_help(void) {
         "  m - move marked to current directory",
         "  c - copy marked to current directory (with progress)",
         "  d - delete marked (if any) else delete selected",
-        "  o - toggle sort key (size/name/mtime)",
+        "  o - toggle sort key (size/name/mtime/delta)",
         "  s - toggle sort order (asc/desc)",
         "  K - cycle theme presets (Dracula, TokyoNight, etc.)",
         "  Y - take baseline snapshot & toggle DIFF mode",
@@ -4174,8 +4185,13 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 }
             }
         } else if (ch == 'o') {
-            // cycle sort key (size -> name -> mtime -> size), keep selection on same path
-            SortMode next_mode = (g_sort_mode == SORT_SIZE) ? SORT_NAME : (g_sort_mode == SORT_NAME ? SORT_MTIME : SORT_SIZE);
+            // cycle sort key (size -> name -> mtime [-> delta] -> size), keep selection on same path
+            SortMode next_mode;
+            if (g_sort_mode == SORT_SIZE) next_mode = SORT_NAME;
+            else if (g_sort_mode == SORT_NAME) next_mode = SORT_MTIME;
+            else if (g_sort_mode == SORT_MTIME) next_mode = g_diff_mode ? SORT_DELTA : SORT_SIZE;
+            else next_mode = SORT_SIZE; // back from delta
+
             if (dv.n > 0) {
                 char *sel_path = xstrdup(dv.v[dv.selected].abs_path);
                 g_sort_mode = next_mode;
