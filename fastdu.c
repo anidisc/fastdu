@@ -125,7 +125,7 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.46.0"
+#define FASTDU_VERSION "0.47.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -180,6 +180,8 @@ typedef struct {
 } AppConfig;
 
 static AppConfig g_config;
+static const char *g_themes[] = {"dark", "dracula", "tokyonight", "light", "pastel"};
+static int g_current_theme_idx = 0;
 
 static short parse_color(const char *name) {
     if (strcasecmp(name, "black") == 0) return COLOR_BLACK;
@@ -205,6 +207,66 @@ static void load_default_config(void) {
     g_config.pairs[8][0] = COLOR_YELLOW; g_config.pairs[8][1] = COLOR_BLUE;   // highlight
 }
 
+static void init_app_colors(void) {
+    if (has_colors()) {
+        for (int i = 1; i <= 8; i++) {
+            init_pair((short)i, g_config.pairs[i][0], g_config.pairs[i][1]);
+        }
+    }
+}
+
+static void apply_theme(const char *name) {
+    // Sync index if name matches a preset
+    for (int i = 0; i < (int)(sizeof(g_themes)/sizeof(g_themes[0])); i++) {
+        if (strcasecmp(name, g_themes[i]) == 0) {
+            g_current_theme_idx = i;
+            break;
+        }
+    }
+
+    if (strcasecmp(name, "dracula") == 0) {
+        g_config.pairs[1][0] = COLOR_MAGENTA; g_config.pairs[1][1] = COLOR_BLACK; // header
+        g_config.pairs[2][0] = COLOR_CYAN;    g_config.pairs[2][1] = -1;          // accent
+        g_config.pairs[3][0] = COLOR_BLUE;    g_config.pairs[3][1] = -1;          // dirs
+        g_config.pairs[4][0] = COLOR_WHITE;   g_config.pairs[4][1] = -1;          // files
+        g_config.pairs[5][0] = COLOR_GREEN;   g_config.pairs[5][1] = -1;          // size s
+        g_config.pairs[6][0] = COLOR_YELLOW;  g_config.pairs[6][1] = -1;          // size m
+        g_config.pairs[7][0] = COLOR_RED;     g_config.pairs[7][1] = -1;          // size l
+        g_config.pairs[8][0] = COLOR_CYAN;    g_config.pairs[8][1] = COLOR_MAGENTA; // highlight
+    } else if (strcasecmp(name, "tokyonight") == 0 || strcasecmp(name, "tokyo") == 0) {
+        g_config.pairs[1][0] = COLOR_BLUE;    g_config.pairs[1][1] = COLOR_BLACK;
+        g_config.pairs[2][0] = COLOR_MAGENTA; g_config.pairs[2][1] = -1;
+        g_config.pairs[3][0] = COLOR_CYAN;    g_config.pairs[3][1] = -1;
+        g_config.pairs[4][0] = COLOR_WHITE;   g_config.pairs[4][1] = -1;
+        g_config.pairs[5][0] = COLOR_BLUE;    g_config.pairs[5][1] = -1;
+        g_config.pairs[6][0] = COLOR_MAGENTA; g_config.pairs[6][1] = -1;
+        g_config.pairs[7][0] = COLOR_RED;     g_config.pairs[7][1] = -1;
+        g_config.pairs[8][0] = COLOR_BLACK;   g_config.pairs[8][1] = COLOR_CYAN;
+    } else if (strcasecmp(name, "light") == 0) {
+        g_config.pairs[1][0] = COLOR_WHITE;   g_config.pairs[1][1] = COLOR_BLUE;
+        g_config.pairs[2][0] = COLOR_BLUE;    g_config.pairs[2][1] = -1;
+        g_config.pairs[3][0] = COLOR_BLUE;    g_config.pairs[3][1] = -1;
+        g_config.pairs[4][0] = COLOR_BLACK;   g_config.pairs[4][1] = -1;
+        g_config.pairs[5][0] = COLOR_GREEN;   g_config.pairs[5][1] = -1;
+        g_config.pairs[6][0] = COLOR_YELLOW;  g_config.pairs[6][1] = -1;
+        g_config.pairs[7][0] = COLOR_RED;     g_config.pairs[7][1] = -1;
+        g_config.pairs[8][0] = COLOR_WHITE;   g_config.pairs[8][1] = COLOR_BLUE;
+    } else if (strcasecmp(name, "pastel") == 0) {
+        g_config.pairs[1][0] = COLOR_CYAN;    g_config.pairs[1][1] = COLOR_BLACK;
+        g_config.pairs[2][0] = COLOR_GREEN;   g_config.pairs[2][1] = -1;
+        g_config.pairs[3][0] = COLOR_MAGENTA; g_config.pairs[3][1] = -1;
+        g_config.pairs[4][0] = COLOR_WHITE;   g_config.pairs[4][1] = -1;
+        g_config.pairs[5][0] = COLOR_CYAN;    g_config.pairs[5][1] = -1;
+        g_config.pairs[6][0] = COLOR_GREEN;   g_config.pairs[6][1] = -1;
+        g_config.pairs[7][0] = COLOR_YELLOW;  g_config.pairs[7][1] = -1;
+        g_config.pairs[8][0] = COLOR_BLACK;   g_config.pairs[8][1] = COLOR_GREEN;
+    } else { // default dark
+        load_default_config();
+        g_current_theme_idx = 0;
+    }
+    if (g_tui_active) init_app_colors();
+}
+
 static void load_config_file(void) {
     load_default_config();
     const char *home = getenv("HOME");
@@ -226,7 +288,8 @@ static void load_config_file(void) {
                 memmove(val, val + 1, len);
             }
             
-            if (strcmp(key, "header_fg") == 0) g_config.pairs[1][0] = parse_color(val);
+            if (strcmp(key, "theme") == 0) apply_theme(val);
+            else if (strcmp(key, "header_fg") == 0) g_config.pairs[1][0] = parse_color(val);
             else if (strcmp(key, "header_bg") == 0) g_config.pairs[1][1] = parse_color(val);
             else if (strcmp(key, "accent_fg") == 0) g_config.pairs[2][0] = parse_color(val);
             else if (strcmp(key, "dir_fg") == 0)    g_config.pairs[3][0] = parse_color(val);
@@ -1865,6 +1928,15 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         attron(COLOR_PAIR(1)); addstr(" | query: ");
         attron(COLOR_PAIR(8) | A_BOLD); addstr(g_search_query);
     }
+
+    // Right-aligned theme info
+    char themebuf[32];
+    snprintf(themebuf, sizeof(themebuf), " [%s] ", g_themes[g_current_theme_idx]);
+    int tw = (int)strlen(themebuf);
+    if (cols > tw + 40) { // Only draw if there's enough space
+        mvaddnstr(rows-2, cols - tw, themebuf, tw);
+    }
+
     attron(COLOR_PAIR(1)); // Reset
     attroff(COLOR_PAIR(8) | A_BOLD);
     attroff(COLOR_PAIR(1));
@@ -2355,6 +2427,14 @@ static unsigned long long compute_marked_total_bytes(Cache *cache) {
     return total;
 }
 
+static void cycle_theme(void) {
+    g_current_theme_idx = (g_current_theme_idx + 1) % (sizeof(g_themes) / sizeof(g_themes[0]));
+    apply_theme(g_themes[g_current_theme_idx]);
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Theme switched to: %s", g_themes[g_current_theme_idx]);
+    draw_status(msg);
+}
+
 static void show_help(void) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
     int w = cols - 8; if (w < 48) w = cols - 4; if (w < 32) w = cols;
@@ -2391,6 +2471,7 @@ static void show_help(void) {
         "  d - delete marked (if any) else delete selected",
         "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
+        "  K - cycle theme presets (Dracula, TokyoNight, etc.)",
         "  I - size display: numeric → percent → off",
         "  i - info column (mtime → owner+perm → hidden)",
         "  TAB / Ctrl-i - toggle graph bar",
@@ -4100,6 +4181,8 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
             } else {
                 g_sort_desc = !g_sort_desc;
             }
+        } else if (ch == 'K') {
+            cycle_theme();
         } else if (ch == 'm') {
             if (g_marks.n == 0) {
 draw_status("No items marked.");

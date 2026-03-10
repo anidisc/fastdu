@@ -1,0 +1,44 @@
+# fastdu Configuration Example
+# Copy this file to ~/.config/fastdu/config.toml to apply changes.
+
+# ---------------------------------------------------------
+# THEME PRESETS
+# ---------------------------------------------------------
+# Choose one of the built-in color presets.
+# Current theme name is displayed in the bottom-right corner (T:[theme]).
+#
+# Valid values: "dark" (default), "dracula", "tokyonight", "light", "pastel"
+theme = "dracula"
+
+# ---------------------------------------------------------
+# CUSTOM COLOR OVERRIDES
+# ---------------------------------------------------------
+# If defined, these values will override the preset selected above.
+#
+# Available colors: "black", "red", "green", "yellow", 
+#                   "blue", "magenta", "cyan", "white"
+
+# Header and Footer bars
+# header_fg = "white"
+# header_bg = "blue"
+
+# Accent color (UI separators, clickable breadcrumbs)
+# accent_fg = "cyan"
+
+# Item colors
+# dir_fg = "blue"
+# file_fg = "white"
+
+# Size-based coloring (color changes based on item size)
+# size_s_fg = "green"   # Small items
+# size_m_fg = "yellow"  # Medium items (>10 MiB)
+# size_l_fg = "red"     # Large items (>1 GiB)
+
+# ---------------------------------------------------------
+# PARSER NOTES
+# ---------------------------------------------------------
+# 1. Lines starting with # are comments.
+# 2. Section headers like [main] are currently ignored.
+# 3. Use spaces around the equal sign (e.g., key = value).
+# 4. Double quotes around string values are optional but recommended.
+# 5. Case-insensitive color names and theme names.
