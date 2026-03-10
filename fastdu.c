@@ -104,6 +104,7 @@ typedef struct {
     char *abs_path;
     int is_dir;
     unsigned long long size;
+    long long delta; // diff from snapshot
     int size_known;
     time_t mtime;
     int depth;    // depth in tree view
@@ -141,6 +142,7 @@ static void print_cli_usage(void) {
     printf("  -ac, --accuracy      Accurate disk usage: force deep rescan and use allocated blocks (slower)\n");
     printf("  -x, --one-file-system Stay on the same file system (do not cross mount points)\n");
     printf("  -e PAT, --exclude PAT Exclude files/dirs matching exact PAT\n");
+    printf("  --diff FILE          Compare with snapshot cache FILE\n");
     printf("  --export FMT FILE    Export results to FILE in FMT (json|csv) and exit\n");
     printf("  -D, --decorative     Decorative UI (column headers, vertical separator, extra colors)\n");
     printf("  -nf, --nerd-fonts    Enable Nerd Fonts icons support (requires compatible font)\n");
@@ -182,6 +184,9 @@ typedef struct {
 static AppConfig g_config;
 static const char *g_themes[] = {"dark", "dracula", "tokyonight", "light", "pastel"};
 static int g_current_theme_idx = 0;
+
+static int g_diff_mode = 0;
+static Cache g_snapshot_cache;
 
 static short parse_color(const char *name) {
     if (strcasecmp(name, "black") == 0) return COLOR_BLACK;
@@ -887,8 +892,20 @@ static void draw_cache_progress(const char *cache_path, FILE *f, long total_byte
  * Attempts to load an existing cache from disk.
  * Returns 1 if loaded, 0 if not found, -1 on error.
  */
-static int cache_load(const char *root, Cache *c) {
-    char *cache_path = path_join(root, CACHE_FILENAME);
+static void cache_copy(Cache *dst, Cache *src) {
+    cache_init(dst);
+    for (int i = 0; i < CACHE_SHARDS; i++) {
+        pthread_mutex_lock(&src->shards[i].mu);
+        for (size_t j = 0; j < src->shards[i].n; j++) {
+            CacheEntry *e = &src->shards[i].v[j];
+            cache_upsert_with_meta(dst, e->abs_path, e->abs_path, e->size, e->last_scan, e->ino, e->dir_mtime);
+        }
+        pthread_mutex_unlock(&src->shards[i].mu);
+    }
+}
+
+static int cache_load_file(const char *cache_path_in, const char *root, Cache *c) {
+    char *cache_path = xstrdup(cache_path_in);
     if (!cache_path) return -1;
     FILE *f = fopen(cache_path, "r");
     int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
@@ -989,6 +1006,14 @@ static int cache_load(const char *root, Cache *c) {
     if (totals_files > 0ULL) g_last_files = totals_files;
     else if (count_v1_v2 > 0ULL) g_last_files = count_v1_v2; // fallback for older caches
     return 1; // loaded
+}
+
+static int cache_load(const char *root, Cache *c) {
+    char *cache_path = path_join(root, CACHE_FILENAME);
+    if (!cache_path) return -1;
+    int rc = cache_load_file(cache_path, root, c);
+    free(cache_path);
+    return rc;
 }
 
 // ------------------------------
@@ -1493,6 +1518,17 @@ static void build_tree_recursive(const char *path, const char *root, Cache *cach
             ve->size = file_size_bytes(&st);
             ve->size_known = 1;
         }
+
+        if (g_diff_mode) {
+            unsigned long long snap_sz = 0;
+            if (cache_get_info(&g_snapshot_cache, ve->abs_path, &snap_sz, NULL, NULL)) {
+                ve->delta = (long long)ve->size - (long long)snap_sz;
+            } else {
+                ve->delta = (long long)ve->size;
+            }
+        } else {
+            ve->delta = 0;
+        }
     }
     closedir(dp);
     qsort(tmp.v, tmp.n, sizeof(ViewEntry), cmp_entries);
@@ -1581,6 +1617,17 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
             ve->size_known = 1;
         } else {
             ve->size = 0ULL; ve->size_known = 1;
+        }
+
+        if (g_diff_mode) {
+            unsigned long long snap_sz = 0;
+            if (cache_get_info(&g_snapshot_cache, ve->abs_path, &snap_sz, NULL, NULL)) {
+                ve->delta = (long long)ve->size - (long long)snap_sz;
+            } else {
+                ve->delta = (long long)ve->size;
+            }
+        } else {
+            ve->delta = 0;
         }
     }
     closedir(dp);
@@ -1911,7 +1958,12 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
 
     // Footer drawing
     move(rows-2, 0);
-    attron(COLOR_PAIR(1)); addstr(" h help | files: ");
+    attron(COLOR_PAIR(1)); addstr(" h help | ");
+    if (g_diff_mode) {
+        attron(COLOR_PAIR(8) | A_BOLD); addstr("DIFF");
+        attron(COLOR_PAIR(1)); addstr(" | ");
+    }
+    addstr("files: ");
     attron(COLOR_PAIR(8) | A_BOLD); printw("%llu", (unsigned long long)g_last_files);
     attron(COLOR_PAIR(1)); addstr(" | size: ");
     attron(COLOR_PAIR(8) | A_BOLD); addstr(totalbuf);
@@ -1952,9 +2004,16 @@ static int compute_size_col_width(const DirView *dv) {
     int w = 1;
     for (size_t i = 0; i < dv->n; i++) {
         char b[64];
-        if (dv->v[i].size_known) human_size(dv->v[i].size, b, sizeof(b)); else snprintf(b, sizeof(b), "?");
-        int lw = (int)strlen(b);
-        if (lw > w) w = lw;
+        if (g_diff_mode) {
+            unsigned long long abs_delta = (dv->v[i].delta < 0) ? (unsigned long long)(-dv->v[i].delta) : (unsigned long long)dv->v[i].delta;
+            human_size(abs_delta, b, sizeof(b));
+            int lw = (int)strlen(b) + 2; // +1 space +1 sign
+            if (lw > w) w = lw;
+        } else {
+            if (dv->v[i].size_known) human_size(dv->v[i].size, b, sizeof(b)); else snprintf(b, sizeof(b), "?");
+            int lw = (int)strlen(b);
+            if (lw > w) w = lw;
+        }
     }
     if (w < 4) w = 4;
     if (w > 12) w = 12;
@@ -2166,7 +2225,12 @@ static void draw_list(const DirView *dv, int top) {
         // left size/percent column
         char sizebuf[64] = "";
         if (sizew > 0) {
-            if (g_display_mode == DISP_PCT) {
+            if (g_diff_mode) {
+                unsigned long long abs_delta = (ve->delta < 0) ? (unsigned long long)(-ve->delta) : (unsigned long long)ve->delta;
+                char hbuf[32];
+                human_size(abs_delta, hbuf, sizeof(hbuf));
+                snprintf(sizebuf, sizeof(sizebuf), "%c%s", (ve->delta >= 0) ? '+' : '-', hbuf);
+            } else if (g_display_mode == DISP_PCT) {
                 if (ve->size_known) {
                     double pct = (double)ve->size * 100.0 / (double)view_total;
                     if (pct > 999.9) pct = 999.9;
@@ -2193,7 +2257,11 @@ static void draw_list(const DirView *dv, int top) {
             // colorize size according to value
             int size_color = 5; // default small
             unsigned long long base_sz = ve->size;
-            if (g_display_mode == DISP_PCT && ve->size_known && view_total > 0ULL) {
+            if (g_diff_mode) {
+                if (ve->delta > 0) size_color = 7; // red for increase
+                else if (ve->delta < 0) size_color = 5; // green for decrease
+                else size_color = 0; // default for no change
+            } else if (g_display_mode == DISP_PCT && ve->size_known && view_total > 0ULL) {
                 double pctv = (double)ve->size * 100.0 / (double)view_total;
                 if (pctv >= 20.0) size_color = 7; else if (pctv >= 5.0) size_color = 6; else size_color = 5;
             } else if (ve->size_known) {
@@ -2201,9 +2269,13 @@ static void draw_list(const DirView *dv, int top) {
                 else if (base_sz >= (10ULL<<20)) size_color = 6; // >= 10 MiB
                 else size_color = 5;
             }
-            if (g_decorative) attron(COLOR_PAIR(size_color));
-            mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
-            if (g_decorative) attroff(COLOR_PAIR(size_color));
+            if (g_decorative || g_diff_mode) {
+                if (size_color > 0) attron(COLOR_PAIR(size_color));
+                mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
+                if (size_color > 0) attroff(COLOR_PAIR(size_color));
+            } else {
+                mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
+            }
         }
         // left vertical separator between type and name
         if (g_decorative) {
@@ -2472,6 +2544,7 @@ static void show_help(void) {
         "  o - toggle sort key (size/name/mtime)",
         "  s - toggle sort order (asc/desc)",
         "  K - cycle theme presets (Dracula, TokyoNight, etc.)",
+        "  Y - take baseline snapshot & toggle DIFF mode",
         "  I - size display: numeric → percent → off",
         "  i - info column (mtime → owner+perm → hidden)",
         "  TAB / Ctrl-i - toggle graph bar",
@@ -3526,9 +3599,12 @@ int main(int argc, char **argv) {
     int headless_flag = 0;
     const char *export_format = NULL;
     const char *export_file = NULL;
+    const char *snapshot_file = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-R") == 0 || strcmp(argv[i], "--reload") == 0) {
             reload_flag = 1;
+        } else if (strcmp(argv[i], "--diff") == 0) {
+            if (i + 1 < argc) snapshot_file = argv[++i];
         } else if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exclude") == 0) {
             if (i + 1 < argc) { exclude_add(argv[++i]); }
         } else if (strcmp(argv[i], "--export") == 0) {
@@ -3635,6 +3711,17 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
     // Prepare cache (load or full rescan)
     Cache cache; cache_init(&cache);
+    cache_init(&g_snapshot_cache);
+
+    if (snapshot_file) {
+        if (cache_load_file(snapshot_file, root, &g_snapshot_cache) > 0) {
+            g_diff_mode = 1;
+            if (debug_all) fprintf(stderr, "[main] snapshot loaded from %s\n", snapshot_file);
+        } else {
+            fprintf(stderr, "Warning: could not load snapshot from %s\n", snapshot_file);
+        }
+    }
+
     int have_cache = 0;
     int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
     if (debug_cache) fprintf(stderr, "[main] cache_load root=%s\n", root);
@@ -4110,6 +4197,19 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
         } else if (ch == 'I') {
             // cycle left size column display: numeric -> percentage -> off -> numeric
             g_display_mode = (g_display_mode == DISP_NUM) ? DISP_PCT : (g_display_mode == DISP_PCT ? DISP_OFF : DISP_NUM);
+        } else if (ch == 'Y') {
+            if (g_diff_mode) {
+                g_diff_mode = 0;
+                cache_free(&g_snapshot_cache);
+                draw_status("Diff mode DISABLED");
+            } else {
+                cache_copy(&g_snapshot_cache, &cache);
+                g_diff_mode = 1;
+                draw_status("Snapshot taken! Diff mode ENABLED relative to this moment.");
+            }
+            // rebuild view to update deltas
+            view_free(&dv);
+            build_dir_view(current, root, &cache, &dv);
         } else if (ch == 't') {
             // toggle filter: all -> dirs -> files -> all (lowercase t)
             if (dv.n > 0) {
@@ -4447,6 +4547,7 @@ draw_status("No items marked.");
     view_free(&dv);
     cache_save(root, &cache);
     cache_free(&cache);
+    if (g_diff_mode) cache_free(&g_snapshot_cache);
     if (g_regex_enabled) { regfree(&g_regex); g_regex_enabled = 0; }
     free(cache_abs);
     exclude_free();
