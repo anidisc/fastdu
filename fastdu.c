@@ -130,7 +130,7 @@ static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const
 static void cache_remove_prefix(Cache *c, const char *prefix);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.50.0"
+#define FASTDU_VERSION "0.51.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -2540,17 +2540,17 @@ static void show_duplicates_view(const char *scan_root, Cache *cache, char *cach
         int ch = getch();
         if (ch == 'q' || ch == 'Q' || ch == 27) break;
         else if (ch == KEY_UP || ch == 'k') {
-            if (sel > 0) {
-                size_t next_sel = sel - 1;
-                while (next_sel > 0 && vi[next_sel].is_header) next_sel--;
-                if (!vi[next_sel].is_header) sel = next_sel;
+            size_t next_sel = sel;
+            while (next_sel > 0) {
+                next_sel--;
+                if (!vi[next_sel].is_header) { sel = next_sel; break; }
             }
             if ((int)sel < top) top = (int)sel;
         } else if (ch == KEY_DOWN || ch == 'j') {
-            if (sel + 1 < vi_n) {
-                size_t next_sel = sel + 1;
-                while (next_sel < vi_n && vi[next_sel].is_header) next_sel++;
-                if (next_sel < vi_n) sel = next_sel;
+            size_t next_sel = sel;
+            while (next_sel + 1 < vi_n) {
+                next_sel++;
+                if (!vi[next_sel].is_header) { sel = next_sel; break; }
             }
             if ((int)sel >= top + list_rows) top = (int)sel - list_rows + 1;
         } else if (ch == ' ' && !vi[sel].is_header) {

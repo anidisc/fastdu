@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.50.0**
+- **Current version: 0.51.0**
 - **License: MIT**
 
 ---
@@ -33,12 +33,13 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 
 ---
 
-## What’s new in 0.50.0 (Duplicate Finder)
+## What’s new in 0.51.0 (Duplicate Finder)
 
 ### 🧹 Waste Space Analyzer
 A powerful tool to find identical files across your directories.
 - **Smart Detection**: Uses a multi-stage approach (Size matching -> Header hashing -> Byte-by-byte comparison) to ensure 100% accuracy with maximum speed.
 - **Interactive UI**: Grouped view of duplicates showing total wasted space (Press `U`).
+- **Fluid Navigation**: Easily navigate through duplicated files while group headers are automatically skipped for a better UX.
 - **Safety First**: Automatically prevents you from accidentally deleting all copies of a file within a group.
 - **Instant Updates**: Deleting duplicates instantly updates your directory totals and the on-disk cache.
 
