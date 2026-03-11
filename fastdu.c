@@ -60,6 +60,8 @@
 #include <signal.h>
 #include <regex.h>
 #include <pwd.h>
+#include <archive.h>
+#include <archive_entry.h>
 #ifdef __linux__
 #include <linux/stat.h>
 #include <liburing.h>
@@ -126,7 +128,7 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.48.0"
+#define FASTDU_VERSION "0.49.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -187,6 +189,18 @@ static int g_current_theme_idx = 0;
 
 static int g_diff_mode = 0;
 static Cache g_snapshot_cache;
+
+static char *g_inside_archive_path = NULL;
+static char *g_archive_subpath = NULL;
+
+static int is_archive_file(const char *path) {
+    struct archive *a = archive_read_new();
+    archive_read_support_filter_all(a);
+    archive_read_support_format_all(a);
+    int r = archive_read_open_filename(a, path, 10240);
+    archive_read_free(a);
+    return (r == ARCHIVE_OK);
+}
 
 static short parse_color(const char *name) {
     if (strcasecmp(name, "black") == 0) return COLOR_BLACK;
@@ -322,7 +336,7 @@ static const char *get_icon(const char *name, int is_dir) {
     if (strcasecmp(dot, ".json") == 0 || strcasecmp(dot, ".yaml") == 0 || strcasecmp(dot, ".yml") == 0) return " ";
     if (strcasecmp(dot, ".pdf") == 0) return " ";
     if (strcasecmp(dot, ".jpg") == 0 || strcasecmp(dot, ".jpeg") == 0 || strcasecmp(dot, ".png") == 0 || strcasecmp(dot, ".gif") == 0) return " ";
-    if (strcasecmp(dot, ".zip") == 0 || strcasecmp(dot, ".tar") == 0 || strcasecmp(dot, ".gz") == 0 || strcasecmp(dot, ".7z") == 0) return " ";
+    if (strcasecmp(dot, ".zip") == 0 || strcasecmp(dot, ".tar") == 0 || strcasecmp(dot, ".gz") == 0 || strcasecmp(dot, ".7z") == 0 || strcasecmp(dot, ".rar") == 0 || strcasecmp(dot, ".iso") == 0 || strcasecmp(dot, ".bz2") == 0 || strcasecmp(dot, ".xz") == 0) return " ";
     if (strcasecmp(dot, ".mp3") == 0 || strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".flac") == 0) return " ";
     if (strcasecmp(dot, ".mp4") == 0 || strcasecmp(dot, ".mkv") == 0 || strcasecmp(dot, ".avi") == 0) return " ";
     
@@ -1559,7 +1573,94 @@ static void build_tree_recursive(const char *path, const char *root, Cache *cach
     free(tmp.path); free(tmp.v); // don't free individual entries, they are now in 'out'
 }
 
+static int build_archive_view(DirView *out) {
+    if (!g_inside_archive_path) return -1;
+    memset(out, 0, sizeof(*out));
+    out->path = path_join(g_inside_archive_path, g_archive_subpath ? g_archive_subpath : "");
+
+    struct archive *a = archive_read_new();
+    archive_read_support_filter_all(a);
+    archive_read_support_format_all(a);
+    if (archive_read_open_filename(a, g_inside_archive_path, 10240) != ARCHIVE_OK) {
+        archive_read_free(a);
+        return -1;
+    }
+
+    struct archive_entry *entry;
+    size_t sublen = g_archive_subpath ? strlen(g_archive_subpath) : 0;
+
+    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        const char *path = archive_entry_pathname(entry);
+        if (!path) continue;
+
+        // Skip leading slash
+        if (path[0] == '/') path++;
+
+        // Check if entry is inside current subpath
+        if (sublen > 0) {
+            if (strncmp(path, g_archive_subpath, sublen) != 0) continue;
+            path += sublen;
+            if (path[0] == '/') path++;
+            if (path[0] == '\0') continue; // it's the directory itself
+        }
+
+        // Determine current level name
+        const char *slash = strchr(path, '/');
+        char name[PATH_MAX];
+        int is_dir = 0;
+        if (slash) {
+            size_t len = (size_t)(slash - path);
+            if (len >= sizeof(name)) len = sizeof(name) - 1;
+            memcpy(name, path, len);
+            name[len] = '\0';
+            is_dir = 1;
+        } else {
+            strncpy(name, path, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+            is_dir = S_ISDIR(archive_entry_mode(entry));
+        }
+
+        // Check if already added (for simulated directories)
+        int exists = 0;
+        for (size_t i = 0; i < out->n; i++) {
+            if (strcmp(out->v[i].name, name) == 0) {
+                if (is_dir) {
+                    out->v[i].size += (unsigned long long)archive_entry_size(entry);
+                }
+                exists = 1;
+                break;
+            }
+        }
+        if (exists) continue;
+
+        if (out->n == out->cap) {
+            size_t newcap = out->cap ? out->cap * 2 : 128;
+            void *nv = realloc(out->v, newcap * sizeof(ViewEntry));
+            if (!nv) break;
+            out->v = (ViewEntry*)nv; out->cap = newcap;
+        }
+        ViewEntry *ve = &out->v[out->n++];
+        memset(ve, 0, sizeof(*ve));
+        ve->name = xstrdup(name);
+        ve->abs_path = path_join(out->path, name);
+        ve->is_dir = is_dir;
+        ve->size = (unsigned long long)archive_entry_size(entry);
+        ve->size_known = 1;
+        ve->mtime = archive_entry_mtime(entry);
+    }
+
+    archive_read_free(a);
+    qsort(out->v, out->n, sizeof(ViewEntry), cmp_entries);
+    out->sizew = compute_size_col_width(out);
+    out->view_total = 0;
+    for (size_t i = 0; i < out->n; i++) out->view_total += out->v[i].size;
+    if (out->view_total == 0) out->view_total = 1;
+
+    return 0;
+}
+
 static int build_dir_view(const char *path, const char *root, Cache *cache, DirView *out) {
+    if (g_inside_archive_path) return build_archive_view(out);
     if (g_tree_mode) {
         memset(out, 0, sizeof(*out));
         out->path = xstrdup(path);
@@ -1921,30 +2022,42 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     attron(COLOR_PAIR(1)); addstr(" fastdu - root: ");
     attron(COLOR_PAIR(8) | A_BOLD); addstr(root);
     attron(COLOR_PAIR(1)); addstr(" - cwd: ");
-    int cx, cy; getyx(stdscr, cy, cx);
-    breadcrumbs_clear();
-    // Use relbuf to draw clickable segments
-    char temp[PATH_MAX]; strncpy(temp, relbuf, sizeof(temp)); temp[sizeof(temp)-1] = '\0';
-    if (strcmp(temp, ".") == 0) {
-        attron(COLOR_PAIR(8) | A_BOLD); addstr(".");
-        int ex; getyx(stdscr, cy, ex);
-        breadcrumbs_add(cx, ex, root);
+    
+    if (g_inside_archive_path) {
+        attron(COLOR_PAIR(8) | A_BOLD); addstr(path_basename_const(g_inside_archive_path));
+        attron(COLOR_PAIR(1)); addstr(" // ");
+        if (g_archive_subpath) {
+            attron(COLOR_PAIR(8) | A_BOLD); addstr(g_archive_subpath);
+        } else {
+            attron(COLOR_PAIR(8) | A_BOLD); addstr(".");
+        }
+        // Skip breadcrumbs for now when inside archive for simplicity
     } else {
-        char *tok = strtok(temp, "/");
-        char current_abs[PATH_MAX]; strncpy(current_abs, root, sizeof(current_abs));
-        int first = 1;
-        while (tok) {
-            if (!first) { attron(COLOR_PAIR(1)); addstr("/"); cx++; }
-            char *next_abs = path_join(current_abs, tok);
-            if (!next_abs) break;
-            strncpy(current_abs, next_abs, sizeof(current_abs));
-            free(next_abs);
-            attron(COLOR_PAIR(8) | A_BOLD); addstr(tok);
+        int cx, cy; getyx(stdscr, cy, cx);
+        breadcrumbs_clear();
+        // Use relbuf to draw clickable segments
+        char temp[PATH_MAX]; strncpy(temp, relbuf, sizeof(temp)); temp[sizeof(temp)-1] = '\0';
+        if (strcmp(temp, ".") == 0) {
+            attron(COLOR_PAIR(8) | A_BOLD); addstr(".");
             int ex; getyx(stdscr, cy, ex);
-            breadcrumbs_add(cx, ex, current_abs);
-            cx = ex;
-            tok = strtok(NULL, "/");
-            first = 0;
+            breadcrumbs_add(cx, ex, root);
+        } else {
+            char *tok = strtok(temp, "/");
+            char current_abs[PATH_MAX]; strncpy(current_abs, root, sizeof(current_abs));
+            int first = 1;
+            while (tok) {
+                if (!first) { attron(COLOR_PAIR(1)); addstr("/"); cx++; }
+                char *next_abs = path_join(current_abs, tok);
+                if (!next_abs) break;
+                strncpy(current_abs, next_abs, sizeof(current_abs));
+                free(next_abs);
+                attron(COLOR_PAIR(8) | A_BOLD); addstr(tok);
+                int ex; getyx(stdscr, cy, ex);
+                breadcrumbs_add(cx, ex, current_abs);
+                cx = ex;
+                tok = strtok(NULL, "/");
+                first = 0;
+            }
         }
     }
     attron(COLOR_PAIR(1)); // Reset to default bar color for padding
@@ -3921,7 +4034,19 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
         } else if (ch == 10 || ch == KEY_RIGHT || ch == 'l') { // Enter
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
-                if (ve->is_dir) {
+                if (g_inside_archive_path) {
+                    if (ve->is_dir) {
+                        navstack_push(&nav, g_archive_subpath ? g_archive_subpath : "", ve->abs_path, dv.selected, top);
+                        if (g_archive_subpath) {
+                            char *next = path_join(g_archive_subpath, ve->name);
+                            free(g_archive_subpath); g_archive_subpath = next;
+                        } else {
+                            g_archive_subpath = xstrdup(ve->name);
+                        }
+                        view_free(&dv); top = 0;
+                        build_dir_view(NULL, root, &cache, &dv);
+                    }
+                } else if (ve->is_dir) {
                     if (g_tree_mode) {
                         if (ve->expanded) expanded_remove(ve->abs_path);
                         else expanded_add(ve->abs_path);
@@ -3937,6 +4062,13 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         top = 0;
                         build_dir_view(current, root, &cache, &dv);
                     }
+                } else if (is_archive_file(ve->abs_path)) {
+                    // Enter archive
+                    navstack_push(&nav, current, ve->abs_path, dv.selected, top);
+                    g_inside_archive_path = xstrdup(ve->abs_path);
+                    g_archive_subpath = NULL;
+                    view_free(&dv); top = 0;
+                    build_dir_view(NULL, root, &cache, &dv);
                 }
             }
         } else if (ch == 'b' || ch == 'B') {
@@ -3950,7 +4082,34 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 if (top < 0) top = 0;
             }
         } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8 || ch == KEY_LEFT) {
-            if (strcmp(current, root) != 0) {
+            if (g_inside_archive_path) {
+                if (g_archive_subpath == NULL) {
+                    // Exit archive entirely
+                    free(g_inside_archive_path); g_inside_archive_path = NULL;
+                } else {
+                    // Go up one level in archive
+                    char *p = get_parent(g_archive_subpath);
+                    free(g_archive_subpath);
+                    if (strcmp(p, "/") == 0) { free(p); g_archive_subpath = NULL; }
+                    else g_archive_subpath = p;
+                }
+                view_free(&dv);
+                build_dir_view(current, root, &cache, &dv);
+                // Restore selection/top from nav stack
+                NavState st;
+                if (navstack_pop(&nav, &st)) {
+                    size_t idx = st.selected;
+                    for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, st.child_path) == 0) { idx = i; break; } }
+                    dv.selected = (dv.n > 0) ? (idx < dv.n ? idx : dv.n - 1) : 0;
+                    top = st.top;
+                    int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_decorative ? 2 : 0);
+                    if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                    if ((int)dv.selected < top) top = (int)dv.selected;
+                    free(st.parent_path); free(st.child_path);
+                } else {
+                    top = 0;
+                }
+            } else if (strcmp(current, root) != 0) {
                 char *parent = get_parent(current);
                 if (parent) {
                     // Move to parent
