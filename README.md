@@ -2,14 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.52.0**
+- **Current version: 0.53.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
-- **Duplicate Finder**: Identify and remove identical files to free up space (Press `U`).
+- **Duplicate Finder**: Identify and remove identical files safely. Now with progress bars and ESC-to-cancel support (Press `U`).
 - **Archive Exploration**: Browse inside `.zip`, `.tar`, `.7z`, `.iso` and more as if they were directories (Press `Enter` to enter, `Backspace` to exit, `ESC` to cancel).
 - **Snapshot Comparison (Diff Mode)**: Compare your current disk usage against a reference baseline (Press `Y`).
 - **Theme Presets**: Switch between Dracula, Tokyo Night, Pastel, Light, and Dark themes (Press `K`).
@@ -30,6 +30,16 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.53.0 (Robust Waste Analysis)
+
+### 🧹 Reactive Duplicate Finder
+The Waste Space Analyzer is now fully interruptible and provides visual feedback during all stages.
+- **Three-Stage Progress**: Separate progress bars for file collection, hashing, and deep comparison.
+- **User Control**: Press `ESC` at any stage to safely cancel the operation and return to the main view.
+- **Fluid Navigation**: Group headers are automatically skipped for a better UX.
 
 ---
 

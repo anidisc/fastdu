@@ -130,7 +130,7 @@ static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const
 static void cache_remove_prefix(Cache *c, const char *prefix);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.52.0"
+#define FASTDU_VERSION "0.53.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -2292,15 +2292,25 @@ static int cmp_ext_entries(const void *a, const void *b) {
     return (ea->size < eb->size) ? 1 : -1;
 }
 
-static void collect_files_recursive_fd(int dirfd, const char *abs_path, FileCandidateList *list) {
+static int collect_files_recursive_fd(int dirfd, const char *abs_path, FileCandidateList *list, int *interrupted_out) {
     int dupfd = dup(dirfd);
-    if (dupfd < 0) return;
+    if (dupfd < 0) return 0;
     DIR *dp = fdopendir(dupfd);
-    if (!dp) { close(dupfd); return; }
+    if (!dp) { close(dupfd); return 0; }
     
     struct dirent *de;
     while ((de = readdir(dp)) != NULL) {
         if (g_interrupted) break;
+        
+        // Check for ESC periodically
+        if (list->n % 256 == 0) {
+            if (getch() == 27) { *interrupted_out = 1; break; }
+            int cols, rows; getmaxyx(stdscr, rows, cols);
+            mvhline(rows-1, 0, ' ', cols);
+            mvprintw(rows-1, 0, " Collecting files: %zu found... - ESC to cancel", list->n);
+            refresh();
+        }
+
         if (is_dot_or_dotdot(de->d_name)) continue;
         if (is_excluded(de->d_name)) continue;
         if (strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
@@ -2324,13 +2334,14 @@ static void collect_files_recursive_fd(int dirfd, const char *abs_path, FileCand
                 }
                 char *child_abs = path_join(abs_path, de->d_name);
                 if (child_abs) {
-                    collect_files_recursive_fd(cfd, child_abs, list);
+                    collect_files_recursive_fd(cfd, child_abs, list, interrupted_out);
                     free(child_abs);
                 }
                 close(cfd);
+                if (*interrupted_out) break;
             }
         } else if (S_ISREG(st.st_mode)) {
-            if (st.st_size > 0) { // Only care about non-empty files for dupes
+            if (st.st_size > 0) {
                 if (list->n == list->cap) {
                     size_t newcap = list->cap ? list->cap * 2 : 1024;
                     void *nv = realloc(list->v, newcap * sizeof(FileCandidate));
@@ -2349,6 +2360,7 @@ static void collect_files_recursive_fd(int dirfd, const char *abs_path, FileCand
         }
     }
     closedir(dp);
+    return *interrupted_out;
 }
 
 static int cmp_file_candidates_size(const void *a, const void *b) {
@@ -2449,22 +2461,34 @@ typedef struct {
 } DupeViewItem;
 
 static void show_duplicates_view(const char *scan_root, Cache *cache, char *cache_abs) {
-    draw_status("Finding duplicates: collecting files...");
+    (void)cache_abs;
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    int interrupted = 0;
     
+    nodelay(stdscr, TRUE);
     FileCandidateList list = {0};
     int fd = open(scan_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd >= 0) {
-        collect_files_recursive_fd(fd, scan_root, &list);
+        collect_files_recursive_fd(fd, scan_root, &list, &interrupted);
         close(fd);
     }
+
+    if (interrupted) {
+        for (size_t i = 0; i < list.n; i++) free(list.v[i].path);
+        free(list.v);
+        nodelay(stdscr, FALSE);
+        draw_status("Duplicate finding cancelled by user.");
+        return;
+    }
+
     if (list.n < 2) {
         for (size_t i = 0; i < list.n; i++) free(list.v[i].path);
         free(list.v);
+        nodelay(stdscr, FALSE);
         draw_status("Not enough files to find duplicates.");
         return;
     }
 
-    draw_status("Finding duplicates: sorting and hashing...");
     qsort(list.v, list.n, sizeof(FileCandidate), cmp_file_candidates_size);
 
     int current_group_id = 1;
@@ -2475,7 +2499,25 @@ static void show_duplicates_view(const char *scan_root, Cache *cache, char *cach
         
         size_t group_size = j - i;
         if (group_size > 1) {
-            for (size_t k = i; k < j; k++) list.v[k].head_hash = hash_file_head(list.v[k].path);
+            // Hashing Phase
+            for (size_t k = i; k < j; k++) {
+                if (getch() == 27) { interrupted = 1; break; }
+                list.v[k].head_hash = hash_file_head(list.v[k].path);
+                
+                // Progress Bar for Hashing
+                if (k % 10 == 0) {
+                    double frac = (double)k / (double)list.n;
+                    int barlen = cols > 40 ? cols - 40 : 20;
+                    char bar[256]; int filled = (int)(frac * barlen);
+                    for (int b=0; b<barlen; b++) bar[b] = (b < filled) ? '#' : '.';
+                    bar[barlen] = '\0';
+                    mvhline(rows-1, 0, ' ', cols);
+                    mvprintw(rows-1, 0, " Hashing candidates: [%s] %d%% - ESC to cancel", bar, (int)(frac*100));
+                    refresh();
+                }
+            }
+            if (interrupted) break;
+
             qsort(&list.v[i], group_size, sizeof(FileCandidate), cmp_file_candidates_hash);
             
             size_t sub_i = i;
@@ -2485,23 +2527,36 @@ static void show_duplicates_view(const char *scan_root, Cache *cache, char *cach
                 
                 size_t sub_size = sub_j - sub_i;
                 if (sub_size > 1 && list.v[sub_i].head_hash != 0) {
-                    // Exact byte-by-byte compare
+                    // Exact byte-by-byte compare Phase
                     for (size_t x = sub_i; x < sub_j; x++) {
                         if (list.v[x].dupe_group_id != 0) continue;
                         int new_group = 0;
                         for (size_t y = x + 1; y < sub_j; y++) {
+                            if (getch() == 27) { interrupted = 1; break; }
                             if (list.v[y].dupe_group_id == 0 && files_are_identical(list.v[x].path, list.v[y].path)) {
                                 if (!new_group) { new_group = 1; list.v[x].dupe_group_id = current_group_id; }
                                 list.v[y].dupe_group_id = current_group_id;
                             }
                         }
+                        if (interrupted) break;
                         if (new_group) current_group_id++;
                     }
                 }
+                if (interrupted) break;
                 sub_i = sub_j;
             }
         }
+        if (interrupted) break;
         i = j;
+    }
+
+    nodelay(stdscr, FALSE);
+
+    if (interrupted) {
+        for (size_t k = 0; k < list.n; k++) free(list.v[k].path);
+        free(list.v);
+        draw_status("Duplicate finding cancelled by user.");
+        return;
     }
 
     // Build View UI Array
