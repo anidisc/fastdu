@@ -60,6 +60,7 @@
 #include <signal.h>
 #include <regex.h>
 #include <pwd.h>
+#include <termios.h>
 #include <archive.h>
 #include <archive_entry.h>
 #ifdef __linux__
@@ -130,7 +131,7 @@ static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const
 static void cache_remove_prefix(Cache *c, const char *prefix);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.53.0"
+#define FASTDU_VERSION "0.54.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -202,6 +203,16 @@ static int is_archive_file(const char *path) {
     int r = archive_read_open_filename(a, path, 10240);
     archive_read_free(a);
     return (r == ARCHIVE_OK);
+}
+
+static int is_image_file(const char *path) {
+    const char *ext = strrchr(path, '.');
+    if (!ext) return 0;
+    if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
+        strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".gif") == 0 ||
+        strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".webp") == 0 ||
+        strcasecmp(ext, ".tiff") == 0 || strcasecmp(ext, ".ico") == 0) return 1;
+    return 0;
 }
 
 static short parse_color(const char *name) {
@@ -3202,7 +3213,77 @@ static int is_textual_file(const char *path) {
     return ratio <= 0.15; // allow up to 15% control/invalid bytes
 }
 
+static void show_image_preview(const char *path) {
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    int w = cols - 4; if (w < 20) w = cols;
+    int h = rows - 4; if (h < 10) h = rows;
+    int x = (cols - w) / 2;
+    int y = (rows - h) / 2;
+
+    WINDOW *win = newwin(h, w, y, x);
+    keypad(win, TRUE);
+    box(win, 0, 0);
+    wattron(win, A_REVERSE | A_BOLD);
+    mvwprintw(win, 0, 2, " Image Preview: %s - [q] to close ", path_basename_const(path));
+    wattroff(win, A_REVERSE | A_BOLD);
+    wrefresh(win);
+
+    // Check if chafa is installed
+    int has_chafa = (system("command -v chafa >/dev/null 2>&1") == 0);
+
+    if (!has_chafa) {
+        mvwprintw(win, h/2, (w-40)/2, "Error: 'chafa' not found on system.");
+        mvwprintw(win, h/2 + 1, (w-46)/2, "Install it to see high-quality image previews.");
+        wrefresh(win);
+    } else {
+        // Run chafa and capture output
+        char cmd[PATH_MAX + 128];
+        snprintf(cmd, sizeof(cmd), "chafa --format=symbols --size=%dx%d \"%s\"", w - 2, h - 2, path);
+        
+        if (system("command -v chafa >/dev/null 2>&1") == 0) {
+            // To show real colors, we must briefly pause ncurses or use a specialized routine.
+            def_prog_mode();
+            endwin();
+            
+            // Re-run chafa directly to stdout in the specific area
+            // We use a temporary shell to position the cursor
+            char direct_cmd[PATH_MAX + 256];
+            // Clear area and draw
+            printf("\033[%d;%dH", y + 2, x + 2); // Position cursor inside the box
+            snprintf(direct_cmd, sizeof(direct_cmd), "chafa --size=%dx%d \"%s\"", w - 2, h - 2, path);
+            system(direct_cmd);
+            
+            printf("\n\033[7m Press any key to return to fastdu... \033[0m");
+            fflush(stdout);
+            
+            // Wait for input without ncurses
+            struct termios oldt, newt;
+            tcgetattr(STDIN_FILENO, &oldt);
+            newt = oldt;
+            newt.c_lflag &= ~(ICANON | ECHO);
+            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+            (void)getchar();
+            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+            
+            reset_prog_mode();
+            refresh();
+        }
+    }
+
+    if (!has_chafa) {
+        while (1) {
+            int ch = wgetch(win);
+            if (ch == 'q' || ch == 'Q' || ch == 27) break;
+        }
+    }
+    delwin(win);
+}
+
 static void show_preview(const char *path) {
+    if (is_image_file(path)) {
+        show_image_preview(path);
+        return;
+    }
     // Try open file and read lines up to a cap
     FILE *fp = fopen(path, "r");
     if (!fp) {

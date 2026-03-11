@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.53.0**
+- **Current version: 0.54.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Image Previews**: View images directly in your terminal using the `v` key (requires **Chafa**).
 - **Duplicate Finder**: Identify and remove identical files safely. Now with progress bars and ESC-to-cancel support (Press `U`).
 - **Archive Exploration**: Browse inside `.zip`, `.tar`, `.7z`, `.iso` and more as if they were directories (Press `Enter` to enter, `Backspace` to exit, `ESC` to cancel).
 - **Snapshot Comparison (Diff Mode)**: Compare your current disk usage against a reference baseline (Press `Y`).
@@ -30,6 +31,16 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.54.0 (Image Previews)
+
+### 🖼 Terminal Image Viewing
+Now you can preview images without leaving the TUI.
+- **Instant Preview**: Press `v` on common image formats (jpg, png, webp, gif, etc.).
+- **Automatic Rendering**: Powered by **Chafa**, it automatically adapts to your terminal's capabilities (Sixel, Kitty, or Unicode blocks).
+- **Seamless Flow**: Simply press any key to exit the preview and return to browsing.
 
 ---
 
@@ -141,13 +152,14 @@ size_l_fg = "red"     # Large files
 - ncurses with wide-char support (`-lncursesw`)
 - pthreads
 - **libarchive** (for archive exploration)
+- **chafa** (optional, for image previews)
 
 ---
 
 ## Build
 
 ```bash
-# On Debian/Ubuntu: sudo apt install libarchive-dev
+# On Debian/Ubuntu: sudo apt install libarchive-dev chafa
 make
 ```
 
