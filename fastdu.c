@@ -205,16 +205,6 @@ static int is_archive_file(const char *path) {
     return (r == ARCHIVE_OK);
 }
 
-static int is_image_file(const char *path) {
-    const char *ext = strrchr(path, '.');
-    if (!ext) return 0;
-    if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
-        strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".gif") == 0 ||
-        strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".webp") == 0 ||
-        strcasecmp(ext, ".tiff") == 0 || strcasecmp(ext, ".ico") == 0) return 1;
-    return 0;
-}
-
 static short parse_color(const char *name) {
     if (strcasecmp(name, "black") == 0) return COLOR_BLACK;
     if (strcasecmp(name, "red") == 0) return COLOR_RED;
@@ -623,6 +613,17 @@ static int strcasestr_bool(const char *hay, const char *needle) {
 static const char *path_basename_const(const char *p) {
     const char *slash = strrchr(p, '/');
     return slash ? slash + 1 : p;
+}
+
+static int is_image_file(const char *path) {
+    const char *base = path_basename_const(path);
+    const char *ext = strrchr(base, '.');
+    if (!ext) return 0;
+    if (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
+        strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".gif") == 0 ||
+        strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".webp") == 0 ||
+        strcasecmp(ext, ".tiff") == 0 || strcasecmp(ext, ".ico") == 0) return 1;
+    return 0;
 }
 
 static int path_exists(const char *p) {
@@ -3232,50 +3233,46 @@ static void show_image_preview(const char *path) {
     int has_chafa = (system("command -v chafa >/dev/null 2>&1") == 0);
 
     if (!has_chafa) {
-        mvwprintw(win, h/2, (w-40)/2, "Error: 'chafa' not found on system.");
-        mvwprintw(win, h/2 + 1, (w-46)/2, "Install it to see high-quality image previews.");
+        const char *msg1 = "Error: 'chafa' not found on system.";
+        const char *msg2 = "Install it to see high-quality image previews.";
+        int m1x = (w > (int)strlen(msg1)) ? (w - (int)strlen(msg1)) / 2 : 1;
+        int m2x = (w > (int)strlen(msg2)) ? (w - (int)strlen(msg2)) / 2 : 1;
+        mvwprintw(win, h/2, m1x, "%s", msg1);
+        mvwprintw(win, h/2 + 1, m2x, "%s", msg2);
         wrefresh(win);
-    } else {
-        // Run chafa and capture output
-        char cmd[PATH_MAX + 128];
-        snprintf(cmd, sizeof(cmd), "chafa --format=symbols --size=%dx%d \"%s\"", w - 2, h - 2, path);
         
-        if (system("command -v chafa >/dev/null 2>&1") == 0) {
-            // To show real colors, we must briefly pause ncurses or use a specialized routine.
-            def_prog_mode();
-            endwin();
-            
-            // Re-run chafa directly to stdout in the specific area
-            // We use a temporary shell to position the cursor
-            char direct_cmd[PATH_MAX + 256];
-            // Clear area and draw
-            printf("\033[%d;%dH", y + 2, x + 2); // Position cursor inside the box
-            snprintf(direct_cmd, sizeof(direct_cmd), "chafa --size=%dx%d \"%s\"", w - 2, h - 2, path);
-            system(direct_cmd);
-            
-            printf("\n\033[7m Press any key to return to fastdu... \033[0m");
-            fflush(stdout);
-            
-            // Wait for input without ncurses
-            struct termios oldt, newt;
-            tcgetattr(STDIN_FILENO, &oldt);
-            newt = oldt;
-            newt.c_lflag &= ~(ICANON | ECHO);
-            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-            (void)getchar();
-            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-            
-            reset_prog_mode();
-            refresh();
-        }
-    }
-
-    if (!has_chafa) {
         while (1) {
             int ch = wgetch(win);
             if (ch == 'q' || ch == 'Q' || ch == 27) break;
         }
+    } else {
+        // Run chafa using the 'pause ncurses' method
+        def_prog_mode();
+        endwin();
+        
+        // Re-run chafa directly to stdout in the specific area
+        char direct_cmd[PATH_MAX + 256];
+        // Move cursor to approximate center of our window area
+        printf("\033[%d;%dH", y + 2, x + 2); 
+        snprintf(direct_cmd, sizeof(direct_cmd), "chafa --size=%dx%d \"%s\"", w - 2, h - 2, path);
+        system(direct_cmd);
+        
+        printf("\n\033[7m Press any key to return to fastdu... \033[0m");
+        fflush(stdout);
+        
+        // Wait for input without ncurses
+        struct termios oldt, newt;
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        newt.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        (void)getchar();
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        
+        reset_prog_mode();
+        refresh();
     }
+
     delwin(win);
 }
 
@@ -4850,10 +4847,10 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 if (ve->is_dir) {
                     draw_status("Preview available only on files");
                 } else {
-                    if (is_textual_file(ve->abs_path)) {
+                    if (is_textual_file(ve->abs_path) || is_image_file(ve->abs_path)) {
                         show_preview(ve->abs_path);
                     } else {
-                        draw_status("Not a text file (binary or unsupported encoding)");
+                        draw_status("Not a supported preview format (text/image)");
                     }
                 }
             }
