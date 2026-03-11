@@ -2017,20 +2017,20 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         snprintf(filterbuf, sizeof(filterbuf), "%s", filter_mode_label());
     }
 
-    // Header drawing
+    // --- Line 0: Main Header ---
     move(0, 0);
     attron(COLOR_PAIR(1)); addstr(" fastdu - root: ");
     attron(COLOR_PAIR(8) | A_BOLD); addstr(root);
     attron(COLOR_PAIR(1)); addstr(" - cwd: ");
     
-    int cx, cy; getyx(stdscr, cy, cx);
+    int cx, cy; getyx(stdscr, cy, cx); (void)cy;
     breadcrumbs_clear();
-    // Use relbuf to draw clickable segments
     char temp[PATH_MAX]; strncpy(temp, relbuf, sizeof(temp)); temp[sizeof(temp)-1] = '\0';
     if (strcmp(temp, ".") == 0) {
         attron(COLOR_PAIR(8) | A_BOLD); addstr(".");
         int ex; getyx(stdscr, cy, ex);
         breadcrumbs_add(cx, ex, root);
+        cx = ex;
     } else {
         char *tok = strtok(temp, "/");
         char current_abs[PATH_MAX]; strncpy(current_abs, root, sizeof(current_abs));
@@ -2050,9 +2050,16 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         }
     }
 
-    // Secondary Archive Header Bar
+    // Add sort and filter info on Line 0
+    attron(COLOR_PAIR(1)); addstr(" - sort: ");
+    attron(COLOR_PAIR(8) | A_BOLD); addstr(sortbuf);
+    attron(COLOR_PAIR(1)); addstr(" - filter: ");
+    attron(COLOR_PAIR(8) | A_BOLD); addstr(filterbuf);
+    attroff(COLOR_PAIR(8) | A_BOLD);
+
+    // --- Line 1: Archive context (if active) ---
     if (g_inside_archive_path) {
-        attron(COLOR_PAIR(2)); // Use accent color for the archive bar
+        attron(COLOR_PAIR(2));
         mvhline(1, 0, ' ', cols);
         mvaddstr(1, 1, "VIRTUAL FS: ");
         attroff(COLOR_PAIR(2));
@@ -2062,14 +2069,8 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         attron(A_BOLD); addstr(g_archive_subpath ? g_archive_subpath : ".");
         attroff(A_BOLD);
     }
-    attron(COLOR_PAIR(1)); // Reset to default bar color for padding
-    attron(COLOR_PAIR(1)); addstr(" - sort: ");
-    attron(COLOR_PAIR(8) | A_BOLD); addstr(sortbuf);
-    attron(COLOR_PAIR(1)); addstr(" - filter: ");
-    attron(COLOR_PAIR(8) | A_BOLD); addstr(filterbuf);
-    attron(COLOR_PAIR(1)); // Reset to default bar color for padding
-    attroff(COLOR_PAIR(8) | A_BOLD);
 
+    // --- Bottom Bar (Footer) ---
     attron(COLOR_PAIR(1));
     mvhline(rows-2, 0, ' ', cols);
     char totalbuf[64];
@@ -2081,7 +2082,6 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         human_size(mt, markedbuf, sizeof(markedbuf));
     }
 
-    // Footer drawing
     move(rows-2, 0);
     attron(COLOR_PAIR(1)); addstr(" h help | ");
     if (g_diff_mode) {
@@ -2106,15 +2106,16 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         attron(COLOR_PAIR(8) | A_BOLD); addstr(g_search_query);
     }
 
-    // Right-aligned theme info
+    // --- Theme info at the far right of the Footer ---
     char themebuf[32];
-    snprintf(themebuf, sizeof(themebuf), " [%s] ", g_themes[g_current_theme_idx]);
+    snprintf(themebuf, sizeof(themebuf), " T:[%s] ", g_themes[g_current_theme_idx]);
     int tw = (int)strlen(themebuf);
-    if (cols > tw + 40) { // Only draw if there's enough space
+    if (cols > tw + cx + 20) {
+        attron(COLOR_PAIR(1));
         mvaddnstr(rows-2, cols - tw, themebuf, tw);
     }
 
-    attron(COLOR_PAIR(1)); // Reset
+    attron(COLOR_PAIR(1)); // Final reset
     attroff(COLOR_PAIR(8) | A_BOLD);
     attroff(COLOR_PAIR(1));
 }
