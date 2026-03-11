@@ -2598,7 +2598,7 @@ static void show_duplicates_view(const char *scan_root, Cache *cache, char *cach
     for (size_t k = 0; k < list.n; k++) free(list.v[k].path);
     free(list.v);
 
-    int cols, rows; getmaxyx(stdscr, rows, cols);
+    getmaxyx(stdscr, rows, cols);
     int top = 0; 
     size_t sel = 0;
     // Start on the first actual file item
