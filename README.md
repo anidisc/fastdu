@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.48.0**
+- **Current version: 0.49.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Archive Exploration**: Browse inside `.zip`, `.tar`, `.7z`, `.iso` and more as if they were directories (Press `Enter` to enter, `Backspace` to exit).
 - **Snapshot Comparison (Diff Mode)**: Compare your current disk usage against a reference baseline (Press `Y`).
 - **Theme Presets**: Switch between Dracula, Tokyo Night, Pastel, Light, and Dark themes (Press `K`).
 - **Tree View Mode**: Toggle a hierarchical view of your directories (Press `A`).
@@ -30,6 +31,15 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
 
 ---
+
+## What’s new in 0.49.0 (Archive Exploration)
+
+### 📦 In-place Archive Browsing
+You can now look inside compressed files without extracting them.
+- **Seamless Navigation**: Press `Enter` on any supported archive (zip, tar, 7z, iso, etc.) to explore its contents.
+- **Virtual FS**: A dedicated secondary header bar shows your current path inside the archive.
+- **Accurate Sizes**: View the uncompressed size of archived files to understand their real impact.
+- **Powered by libarchive**: Wide format support and high performance.
 
 ## What’s new in 0.48.0 (Snapshot Comparison & Themes)
 
@@ -98,12 +108,14 @@ size_l_fg = "red"     # Large files
 - gcc (or another C11-compatible compiler)
 - ncurses with wide-char support (`-lncursesw`)
 - pthreads
+- **libarchive** (for archive exploration)
 
 ---
 
 ## Build
 
 ```bash
+# On Debian/Ubuntu: sudo apt install libarchive-dev
 make
 ```
 
