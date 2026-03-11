@@ -2023,42 +2023,44 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     attron(COLOR_PAIR(8) | A_BOLD); addstr(root);
     attron(COLOR_PAIR(1)); addstr(" - cwd: ");
     
-    if (g_inside_archive_path) {
-        attron(COLOR_PAIR(8) | A_BOLD); addstr(path_basename_const(g_inside_archive_path));
-        attron(COLOR_PAIR(1)); addstr(" // ");
-        if (g_archive_subpath) {
-            attron(COLOR_PAIR(8) | A_BOLD); addstr(g_archive_subpath);
-        } else {
-            attron(COLOR_PAIR(8) | A_BOLD); addstr(".");
-        }
-        // Skip breadcrumbs for now when inside archive for simplicity
+    int cx, cy; getyx(stdscr, cy, cx);
+    breadcrumbs_clear();
+    // Use relbuf to draw clickable segments
+    char temp[PATH_MAX]; strncpy(temp, relbuf, sizeof(temp)); temp[sizeof(temp)-1] = '\0';
+    if (strcmp(temp, ".") == 0) {
+        attron(COLOR_PAIR(8) | A_BOLD); addstr(".");
+        int ex; getyx(stdscr, cy, ex);
+        breadcrumbs_add(cx, ex, root);
     } else {
-        int cx, cy; getyx(stdscr, cy, cx);
-        breadcrumbs_clear();
-        // Use relbuf to draw clickable segments
-        char temp[PATH_MAX]; strncpy(temp, relbuf, sizeof(temp)); temp[sizeof(temp)-1] = '\0';
-        if (strcmp(temp, ".") == 0) {
-            attron(COLOR_PAIR(8) | A_BOLD); addstr(".");
+        char *tok = strtok(temp, "/");
+        char current_abs[PATH_MAX]; strncpy(current_abs, root, sizeof(current_abs));
+        int first = 1;
+        while (tok) {
+            if (!first) { attron(COLOR_PAIR(1)); addstr("/"); cx++; }
+            char *next_abs = path_join(current_abs, tok);
+            if (!next_abs) break;
+            strncpy(current_abs, next_abs, sizeof(current_abs));
+            free(next_abs);
+            attron(COLOR_PAIR(8) | A_BOLD); addstr(tok);
             int ex; getyx(stdscr, cy, ex);
-            breadcrumbs_add(cx, ex, root);
-        } else {
-            char *tok = strtok(temp, "/");
-            char current_abs[PATH_MAX]; strncpy(current_abs, root, sizeof(current_abs));
-            int first = 1;
-            while (tok) {
-                if (!first) { attron(COLOR_PAIR(1)); addstr("/"); cx++; }
-                char *next_abs = path_join(current_abs, tok);
-                if (!next_abs) break;
-                strncpy(current_abs, next_abs, sizeof(current_abs));
-                free(next_abs);
-                attron(COLOR_PAIR(8) | A_BOLD); addstr(tok);
-                int ex; getyx(stdscr, cy, ex);
-                breadcrumbs_add(cx, ex, current_abs);
-                cx = ex;
-                tok = strtok(NULL, "/");
-                first = 0;
-            }
+            breadcrumbs_add(cx, ex, current_abs);
+            cx = ex;
+            tok = strtok(NULL, "/");
+            first = 0;
         }
+    }
+
+    // Secondary Archive Header Bar
+    if (g_inside_archive_path) {
+        attron(COLOR_PAIR(2)); // Use accent color for the archive bar
+        mvhline(1, 0, ' ', cols);
+        mvaddstr(1, 1, "VIRTUAL FS: ");
+        attroff(COLOR_PAIR(2));
+        attron(COLOR_PAIR(8) | A_BOLD);
+        addstr(path_basename_const(g_inside_archive_path));
+        attron(A_NORMAL); addstr(" // ");
+        attron(A_BOLD); addstr(g_archive_subpath ? g_archive_subpath : ".");
+        attroff(A_BOLD);
     }
     attron(COLOR_PAIR(1)); // Reset to default bar color for padding
     attron(COLOR_PAIR(1)); addstr(" - sort: ");
@@ -2276,8 +2278,9 @@ static void show_extension_view(const DirView *dv) {
  */
 static void draw_list(const DirView *dv, int top) {
     int cols; int rows; getmaxyx(stdscr, rows, cols);
-    int y = g_decorative ? 3 : 1; // below header and optional header-bar + thin line
-    int list_rows = rows - 3 - (g_decorative ? 2 : 0); // header + footer [+ column bar + thin line]
+    int archive_offset = g_inside_archive_path ? 1 : 0;
+    int y = (g_decorative ? 3 : 1) + archive_offset;
+    int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
     int sizew = dv->sizew;
     int mark_col = 0; // mark column at 0
     int size_col = 2; // mark + space
@@ -2292,8 +2295,9 @@ static void draw_list(const DirView *dv, int top) {
 
     // Decorative header bar (column titles)
     if (g_decorative) {
+        int h_y = 1 + archive_offset;
         attron(COLOR_PAIR(1));
-        mvhline(1, 0, ' ', cols);
+        mvhline(h_y, 0, ' ', cols);
         // Build dynamic titles
         char size_title[16];
         if (g_display_mode == DISP_PCT) snprintf(size_title, sizeof(size_title), "Size(%%)");
@@ -2304,25 +2308,25 @@ static void draw_list(const DirView *dv, int top) {
         else if (g_info_col_mode == INFOCOL_OWNER_PERM) snprintf(info_title, sizeof(info_title), "Info(perm)");
         else snprintf(info_title, sizeof(info_title), "Info(hidden)");
         // Left headings
-        mvaddnstr(1, 0, " M ", cols);
+        mvaddnstr(h_y, 0, " M ", cols);
         // Size header aligned to size column width
         int stlen = (int)strlen(size_title);
         int spad = (sizew > stlen) ? (sizew - stlen) : 0;
-        for (int k = 0; k < spad; k++) mvaddch(1, size_col + k, ' ');
-        mvaddnstr(1, size_col + spad, size_title, sizew - spad);
+        for (int k = 0; k < spad; k++) mvaddch(h_y, size_col + k, ' ');
+        mvaddnstr(h_y, size_col + spad, size_title, sizew - spad);
         // Type header at exact type_col
-        mvaddnstr(1, type_col, "T", cols - type_col);
+        mvaddnstr(h_y, type_col, "T", cols - type_col);
         // Bar header
-        if (g_show_graph) mvaddnstr(1, bar_col, "Graph", bar_w);
+        if (g_show_graph) mvaddnstr(h_y, bar_col, "Graph", bar_w);
         // Name header begins at name_col
         int name_width = (info_col - name_col - 2);
-        if (name_width > 0) mvaddnstr(1, name_col, "Name", name_width);
+        if (name_width > 0) mvaddnstr(h_y, name_col, "Name", name_width);
         // Right heading
-        if (info_w > 0) mvaddnstr(1, info_col, info_title, info_w);
+        if (info_w > 0) mvaddnstr(h_y, info_col, info_title, info_w);
         attroff(COLOR_PAIR(1));
         // Thin horizontal line below headerbar
         attron(COLOR_PAIR(2));
-        mvhline(2, 0, ACS_HLINE, cols);
+        mvhline(h_y + 1, 0, ACS_HLINE, cols);
         attroff(COLOR_PAIR(2));
     }
 
@@ -2450,7 +2454,9 @@ static void draw_list(const DirView *dv, int top) {
 
         int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - indent - icon_w - 1) : (info_col - name_col - indent - icon_w - 1);
         if (name_max < 0) name_max = 0;
+        if (g_inside_archive_path && !is_sel) attron(COLOR_PAIR(2));
         draw_truncated_name(y + i, name_col + indent + icon_w, ve->name, name_max);
+        if (g_inside_archive_path && !is_sel) attroff(COLOR_PAIR(2));
         if (ve->is_dir) attroff(A_BOLD);
         // left vertical separator between type and name (after drawing type and name)
         if (g_decorative) {
