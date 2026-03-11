@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.49.0**
+- **Current version: 0.50.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Duplicate Finder**: Identify and remove identical files to free up space (Press `U`).
 - **Archive Exploration**: Browse inside `.zip`, `.tar`, `.7z`, `.iso` and more as if they were directories (Press `Enter` to enter, `Backspace` to exit).
 - **Snapshot Comparison (Diff Mode)**: Compare your current disk usage against a reference baseline (Press `Y`).
 - **Theme Presets**: Switch between Dracula, Tokyo Night, Pastel, Light, and Dark themes (Press `K`).
@@ -29,6 +30,17 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.50.0 (Duplicate Finder)
+
+### 🧹 Waste Space Analyzer
+A powerful tool to find identical files across your directories.
+- **Smart Detection**: Uses a multi-stage approach (Size matching -> Header hashing -> Byte-by-byte comparison) to ensure 100% accuracy with maximum speed.
+- **Interactive UI**: Grouped view of duplicates showing total wasted space (Press `U`).
+- **Safety First**: Automatically prevents you from accidentally deleting all copies of a file within a group.
+- **Instant Updates**: Deleting duplicates instantly updates your directory totals and the on-disk cache.
 
 ---
 
