@@ -130,7 +130,7 @@ static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const
 static void cache_remove_prefix(Cache *c, const char *prefix);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.51.0"
+#define FASTDU_VERSION "0.52.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -1637,6 +1637,11 @@ static int build_archive_view(DirView *out) {
     memset(out, 0, sizeof(*out));
     out->path = path_join(g_inside_archive_path, g_archive_subpath ? g_archive_subpath : "");
 
+    // Get archive file size for progress bar
+    struct stat st_arc;
+    long long total_compressed_bytes = 0;
+    if (stat(g_inside_archive_path, &st_arc) == 0) total_compressed_bytes = st_arc.st_size;
+
     struct archive *a = archive_read_new();
     archive_read_support_filter_all(a);
     archive_read_support_format_all(a);
@@ -1648,7 +1653,34 @@ static int build_archive_view(DirView *out) {
     struct archive_entry *entry;
     size_t sublen = g_archive_subpath ? strlen(g_archive_subpath) : 0;
 
+    nodelay(stdscr, TRUE); // Non-blocking input to catch ESC
+    int interrupted = 0;
+    int entry_count = 0;
+
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        entry_count++;
+        // Check for ESC key (27)
+        int ch = getch();
+        if (ch == 27) { interrupted = 1; break; }
+
+        // Draw progress bar every ~100 entries to avoid flickering/slowdown
+        if (entry_count % 100 == 0 && total_compressed_bytes > 0) {
+            long long read_bytes = archive_filter_bytes(a, -1);
+            double frac = (double)read_bytes / (double)total_compressed_bytes;
+            if (frac > 1.0) frac = 1.0;
+            
+            int cols, rows; getmaxyx(stdscr, rows, cols);
+            int barlen = cols > 40 ? cols - 40 : 20;
+            char bar[256];
+            int filled = (int)(frac * barlen);
+            for (int i=0; i<barlen; i++) bar[i] = (i < filled) ? '#' : '.';
+            bar[barlen] = '\0';
+            
+            mvhline(rows-1, 0, ' ', cols);
+            mvprintw(rows-1, 0, " Reading Archive: [%s] %3d%% - ESC to cancel", bar, (int)(frac * 100));
+            refresh();
+        }
+
         const char *path = archive_entry_pathname(entry);
         if (!path) continue;
 
@@ -1709,6 +1741,14 @@ static int build_archive_view(DirView *out) {
     }
 
     archive_read_free(a);
+    nodelay(stdscr, FALSE); // Restore blocking input
+
+    if (interrupted) {
+        view_free(out);
+        draw_status("Archive reading cancelled by user.");
+        return -1;
+    }
+
     qsort(out->v, out->n, sizeof(ViewEntry), cmp_entries);
     out->sizew = compute_size_col_width(out);
     out->view_total = 0;

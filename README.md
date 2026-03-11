@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.51.0**
+- **Current version: 0.52.0**
 - **License: MIT**
 
 ---
@@ -10,7 +10,7 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 ## Highlights
 
 - **Duplicate Finder**: Identify and remove identical files to free up space (Press `U`).
-- **Archive Exploration**: Browse inside `.zip`, `.tar`, `.7z`, `.iso` and more as if they were directories (Press `Enter` to enter, `Backspace` to exit).
+- **Archive Exploration**: Browse inside `.zip`, `.tar`, `.7z`, `.iso` and more as if they were directories (Press `Enter` to enter, `Backspace` to exit, `ESC` to cancel).
 - **Snapshot Comparison (Diff Mode)**: Compare your current disk usage against a reference baseline (Press `Y`).
 - **Theme Presets**: Switch between Dracula, Tokyo Night, Pastel, Light, and Dark themes (Press `K`).
 - **Tree View Mode**: Toggle a hierarchical view of your directories (Press `A`).
@@ -30,6 +30,15 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.52.0 (UX Refinements)
+
+### 📦 Robust Archive Browsing
+Improved the experience when opening very large compressed files.
+- **Progress Tracking**: A new progress bar shows the reading status of the archive based on processed bytes.
+- **Interruptible Reading**: You can now press `ESC` at any time to stop reading a large archive and return to the normal view without blocking the program.
 
 ---
 
