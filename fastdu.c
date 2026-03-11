@@ -126,6 +126,8 @@ typedef struct {
 static void draw_status(const char *msg);
 static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
+static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
+static void cache_remove_prefix(Cache *c, const char *prefix);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
 #define FASTDU_VERSION "0.49.0"
@@ -390,6 +392,63 @@ static void human_size(unsigned long long v, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%llu %s", (unsigned long long)v, units[i]);
     else
         snprintf(buf, bufsz, "%.1f %s", d, units[i]);
+}
+
+// ------------------------------
+// Duplicate Finder (Hashing & Compare)
+// ------------------------------
+typedef struct {
+    char *path;
+    unsigned long long size;
+    uint64_t head_hash;
+    int dupe_group_id;
+} FileCandidate;
+
+typedef struct {
+    FileCandidate *v;
+    size_t n;
+    size_t cap;
+} FileCandidateList;
+
+static uint64_t fnv1a_hash(const void *data, size_t len) {
+    uint64_t hash = 14695981039346656037ULL;
+    const unsigned char *p = (const unsigned char *)data;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= p[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static uint64_t hash_file_head(const char *path) {
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    char buf[4096];
+    ssize_t r = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (r <= 0) return 0;
+    return fnv1a_hash(buf, (size_t)r);
+}
+
+static int files_are_identical(const char *p1, const char *p2) {
+    int fd1 = open(p1, O_RDONLY | O_NOFOLLOW);
+    if (fd1 < 0) return 0;
+    int fd2 = open(p2, O_RDONLY | O_NOFOLLOW);
+    if (fd2 < 0) { close(fd1); return 0; }
+    
+    char buf1[32768];
+    char buf2[32768];
+    int identical = 1;
+    while (1) {
+        ssize_t r1 = read(fd1, buf1, sizeof(buf1));
+        ssize_t r2 = read(fd2, buf2, sizeof(buf2));
+        if (r1 != r2) { identical = 0; break; }
+        if (r1 <= 0) break; // EOF or error
+        if (memcmp(buf1, buf2, r1) != 0) { identical = 0; break; }
+    }
+    close(fd1);
+    close(fd2);
+    return identical;
 }
 
 // ------------------------------
@@ -2193,6 +2252,79 @@ static int cmp_ext_entries(const void *a, const void *b) {
     return (ea->size < eb->size) ? 1 : -1;
 }
 
+static void collect_files_recursive_fd(int dirfd, const char *abs_path, FileCandidateList *list) {
+    int dupfd = dup(dirfd);
+    if (dupfd < 0) return;
+    DIR *dp = fdopendir(dupfd);
+    if (!dp) { close(dupfd); return; }
+    
+    struct dirent *de;
+    while ((de = readdir(dp)) != NULL) {
+        if (g_interrupted) break;
+        if (is_dot_or_dotdot(de->d_name)) continue;
+        if (is_excluded(de->d_name)) continue;
+        if (strcmp(de->d_name, CACHE_FILENAME) == 0) continue;
+        
+        unsigned char dtype = de->d_type;
+        if (dtype == DT_LNK) continue;
+        
+        struct stat st;
+        if (fstatat(dirfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+        if (S_ISLNK(st.st_mode)) continue;
+        
+        if (S_ISDIR(st.st_mode)) {
+            int cfd = openat(dirfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (cfd >= 0) {
+                if (g_one_file_system) {
+                    struct stat stch;
+                    if (fstat(cfd, &stch) == 0 && stch.st_dev != g_root_dev) {
+                        close(cfd);
+                        continue;
+                    }
+                }
+                char *child_abs = path_join(abs_path, de->d_name);
+                if (child_abs) {
+                    collect_files_recursive_fd(cfd, child_abs, list);
+                    free(child_abs);
+                }
+                close(cfd);
+            }
+        } else if (S_ISREG(st.st_mode)) {
+            if (st.st_size > 0) { // Only care about non-empty files for dupes
+                if (list->n == list->cap) {
+                    size_t newcap = list->cap ? list->cap * 2 : 1024;
+                    void *nv = realloc(list->v, newcap * sizeof(FileCandidate));
+                    if (nv) { list->v = nv; list->cap = newcap; }
+                    else break;
+                }
+                char *child_abs = path_join(abs_path, de->d_name);
+                if (child_abs) {
+                    FileCandidate *fc = &list->v[list->n++];
+                    fc->path = child_abs;
+                    fc->size = (unsigned long long)st.st_size;
+                    fc->head_hash = 0;
+                    fc->dupe_group_id = 0;
+                }
+            }
+        }
+    }
+    closedir(dp);
+}
+
+static int cmp_file_candidates_size(const void *a, const void *b) {
+    const FileCandidate *ea = (const FileCandidate *)a;
+    const FileCandidate *eb = (const FileCandidate *)b;
+    if (ea->size != eb->size) return (ea->size < eb->size) ? 1 : -1; // Descending size
+    return strcmp(ea->path, eb->path);
+}
+
+static int cmp_file_candidates_hash(const void *a, const void *b) {
+    const FileCandidate *ea = (const FileCandidate *)a;
+    const FileCandidate *eb = (const FileCandidate *)b;
+    if (ea->head_hash != eb->head_hash) return (ea->head_hash < eb->head_hash) ? -1 : 1;
+    return strcmp(ea->path, eb->path);
+}
+
 static void show_extension_view(const DirView *dv) {
     if (dv->n == 0) return;
     size_t cap = 32, n = 0;
@@ -2266,6 +2398,205 @@ static void show_extension_view(const DirView *dv) {
     delwin(win);
     for (size_t i = 0; i < n; i++) free(entries[i].ext);
     free(entries);
+}
+
+typedef struct {
+    int is_header;
+    int group_id;
+    unsigned long long size;
+    char *path;
+    int marked;
+} DupeViewItem;
+
+static void show_duplicates_view(const char *scan_root, Cache *cache, char *cache_abs) {
+    draw_status("Finding duplicates: collecting files...");
+    
+    FileCandidateList list = {0};
+    int fd = open(scan_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd >= 0) {
+        collect_files_recursive_fd(fd, scan_root, &list);
+        close(fd);
+    }
+    if (list.n < 2) {
+        for (size_t i = 0; i < list.n; i++) free(list.v[i].path);
+        free(list.v);
+        draw_status("Not enough files to find duplicates.");
+        return;
+    }
+
+    draw_status("Finding duplicates: sorting and hashing...");
+    qsort(list.v, list.n, sizeof(FileCandidate), cmp_file_candidates_size);
+
+    int current_group_id = 1;
+    size_t i = 0;
+    while (i < list.n) {
+        size_t j = i + 1;
+        while (j < list.n && list.v[j].size == list.v[i].size) j++;
+        
+        size_t group_size = j - i;
+        if (group_size > 1) {
+            for (size_t k = i; k < j; k++) list.v[k].head_hash = hash_file_head(list.v[k].path);
+            qsort(&list.v[i], group_size, sizeof(FileCandidate), cmp_file_candidates_hash);
+            
+            size_t sub_i = i;
+            while (sub_i < j) {
+                size_t sub_j = sub_i + 1;
+                while (sub_j < j && list.v[sub_j].head_hash == list.v[sub_i].head_hash) sub_j++;
+                
+                size_t sub_size = sub_j - sub_i;
+                if (sub_size > 1 && list.v[sub_i].head_hash != 0) {
+                    // Exact byte-by-byte compare
+                    for (size_t x = sub_i; x < sub_j; x++) {
+                        if (list.v[x].dupe_group_id != 0) continue;
+                        int new_group = 0;
+                        for (size_t y = x + 1; y < sub_j; y++) {
+                            if (list.v[y].dupe_group_id == 0 && files_are_identical(list.v[x].path, list.v[y].path)) {
+                                if (!new_group) { new_group = 1; list.v[x].dupe_group_id = current_group_id; }
+                                list.v[y].dupe_group_id = current_group_id;
+                            }
+                        }
+                        if (new_group) current_group_id++;
+                    }
+                }
+                sub_i = sub_j;
+            }
+        }
+        i = j;
+    }
+
+    // Build View UI Array
+    size_t dupes_count = 0;
+    for (size_t k = 0; k < list.n; k++) if (list.v[k].dupe_group_id > 0) dupes_count++;
+    
+    if (dupes_count == 0) {
+        for (size_t k = 0; k < list.n; k++) free(list.v[k].path);
+        free(list.v);
+        draw_status("No duplicates found.");
+        return;
+    }
+
+    size_t vi_cap = dupes_count + current_group_id;
+    DupeViewItem *vi = calloc(vi_cap, sizeof(DupeViewItem));
+    size_t vi_n = 0;
+    unsigned long long total_wasted = 0;
+
+    for (int g = 1; g < current_group_id; g++) {
+        unsigned long long g_size = 0;
+        int count_in_group = 0;
+        for (size_t k = 0; k < list.n; k++) {
+            if (list.v[k].dupe_group_id == g) {
+                g_size = list.v[k].size;
+                count_in_group++;
+            }
+        }
+        if (count_in_group > 1) {
+            total_wasted += g_size * (count_in_group - 1);
+            vi[vi_n++] = (DupeViewItem){.is_header=1, .group_id=g, .size=g_size, .path=NULL, .marked=0};
+            for (size_t k = 0; k < list.n; k++) {
+                if (list.v[k].dupe_group_id == g) {
+                    vi[vi_n++] = (DupeViewItem){.is_header=0, .group_id=g, .size=g_size, .path=xstrdup(list.v[k].path), .marked=0};
+                }
+            }
+        }
+    }
+
+    for (size_t k = 0; k < list.n; k++) free(list.v[k].path);
+    free(list.v);
+
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    int top = 0; size_t sel = 1; // start on first file, not header
+    
+    for (;;) {
+        erase();
+        attron(COLOR_PAIR(1)); mvhline(0, 0, ' ', cols);
+        char wst[64]; human_size(total_wasted, wst, sizeof(wst));
+        mvprintw(0, 0, " Duplicate Finder - %llu duplicates, %s total waste - [SPACE] mark, [d] delete, [q] close", (unsigned long long)dupes_count, wst);
+        attroff(COLOR_PAIR(1));
+        
+        int list_rows = rows - 1;
+        for (int r = 0; r < list_rows; r++) {
+            int idx = top + r;
+            if (idx >= (int)vi_n) break;
+            int y = r + 1;
+            int is_sel = (idx == (int)sel);
+            
+            if (vi[idx].is_header) {
+                attron(COLOR_PAIR(3) | A_BOLD);
+                char sz[32]; human_size(vi[idx].size, sz, sizeof(sz));
+                mvprintw(y, 0, "--- [Group %d] Size: %s ---", vi[idx].group_id, sz);
+                attroff(COLOR_PAIR(3) | A_BOLD);
+            } else {
+                if (is_sel) attron(A_REVERSE | A_BOLD);
+                mvprintw(y, 2, "[%c] %s", vi[idx].marked ? '*' : ' ', vi[idx].path);
+                if (is_sel) attroff(A_REVERSE | A_BOLD);
+            }
+        }
+        refresh();
+        
+        int ch = getch();
+        if (ch == 'q' || ch == 'Q' || ch == 27) break;
+        else if (ch == KEY_UP || ch == 'k') {
+            if (sel > 0) sel--;
+            if ((int)sel < top) top = (int)sel;
+        } else if (ch == KEY_DOWN || ch == 'j') {
+            if (sel + 1 < vi_n) sel++;
+            if ((int)sel >= top + list_rows) top = (int)sel - list_rows + 1;
+        } else if (ch == ' ' && !vi[sel].is_header) {
+            vi[sel].marked = !vi[sel].marked;
+        } else if (ch == 'd' || ch == 'D' || ch == KEY_DC) {
+            // Delete marked
+            int count_deleted = 0;
+            unsigned long long freed = 0;
+            for (size_t k = 0; k < vi_n; k++) {
+                if (!vi[k].is_header && vi[k].marked) {
+                    // Protect against deleting all files in a group
+                    int group = vi[k].group_id;
+                    int total_in_group = 0; int marked_in_group = 0;
+                    for (size_t m = 0; m < vi_n; m++) {
+                        if (!vi[m].is_header && vi[m].group_id == group) {
+                            total_in_group++;
+                            if (vi[m].marked) marked_in_group++;
+                        }
+                    }
+                    if (marked_in_group == total_in_group) {
+                        // Unmark one randomly (the first one) to protect data
+                        for (size_t m = 0; m < vi_n; m++) {
+                            if (!vi[m].is_header && vi[m].group_id == group && vi[m].marked) {
+                                vi[m].marked = 0;
+                                break;
+                            }
+                        }
+                    }
+                    if (vi[k].marked) {
+                        if (unlink(vi[k].path) == 0) {
+                            count_deleted++;
+                            freed += vi[k].size;
+                            // Update cache
+                            cache_adjust_ancestors_after_delta(cache, scan_root, vi[k].path, (long long)vi[k].size);
+                            vi[k].path[0] = '\0'; // Mark as deleted internally
+                            vi[k].marked = 0;
+                        }
+                    }
+                }
+            }
+            if (count_deleted > 0) {
+                if (g_last_bytes >= freed) g_last_bytes -= freed;
+                if (g_last_files >= (unsigned long long)count_deleted) g_last_files -= count_deleted;
+                cache_save(scan_root, cache);
+                char msg[64];
+                snprintf(msg, sizeof(msg), "Deleted %d duplicates.", count_deleted);
+                draw_status(msg);
+                napms(1000); // let user see it
+                break; // exit view to let normal ui refresh, could also rebuild in place but breaking is safer
+            } else {
+                draw_status("No items marked for deletion.");
+                napms(500);
+            }
+        }
+    }
+    
+    for (size_t k = 0; k < vi_n; k++) free(vi[k].path);
+    free(vi);
 }
 
 /*
@@ -2660,6 +2991,7 @@ static void show_help(void) {
         "  v - preview selected text file (scrollable layer)",
         "  a - toggle tree view mode",
         "  E - extension distribution view (current directory)",
+        "  U - duplicate finder (waste space analyzer)",
         "  O - open selected item with system default (xdg-open)",
         "  r - rescan selected dir",
         "  R - rescan current dir (parallel)",
@@ -4339,6 +4671,15 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             }
         } else if (ch == 'E') {
             show_extension_view(&dv);
+        } else if (ch == 'U') {
+            if (g_inside_archive_path) {
+                draw_status("Duplicate finder is not supported inside archives.");
+            } else {
+                show_duplicates_view(current, &cache, cache_abs);
+                // rebuild view in case duplicates were deleted
+                view_free(&dv);
+                build_dir_view(current, root, &cache, &dv);
+            }
         } else if (ch == 'O') {
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];

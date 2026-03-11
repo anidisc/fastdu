@@ -33,12 +33,12 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [ ] **Log Errori Permessi:** Creare una vista dedicata per visualizzare i file/directory che non è stato possibile scansionare per problemi di permessi, evitando di saltarli silenziosamente.
 
 ### 7. Analisi Avanzata & Intelligenza
-- [ ] **Rilevamento Duplicati:** Modalità per identificare file identici (stessa dimensione e hash) per suggerire la pulizia dello spazio.
+- [x] **Rilevamento Duplicati:** Modalità per identificare file identici (stessa dimensione e hash) per suggerire la pulizia dello spazio.
 - [x] **Visualizzazione ad Albero:** Aggiungere una modalità "Tree View" o "Treemap" testuale per avere una visione d'insieme della struttura del disco.
 - [ ] **Consapevolezza Git:** Opzione per ignorare automaticamente i file definiti nei `.gitignore` presenti nelle sottocartelle.
 
 ### 8. Ecosistema & Estensioni
-- [ ] **Esplorazione Archivi:** Permettere di entrare nei file `.zip`, `.tar.gz` o `.7z` come se fossero directory normali per esplorarne il contenuto.
+- [x] **Esplorazione Archivi:** Permettere di entrare nei file `.zip`, `.tar.gz` o `.7z` come se fossero directory normali per esplorarne il contenuto.
 - [ ] **Filesystem Remoti:** Supporto per la scansione e navigazione di server remoti tramite protocolli SSH/SFTP.
 - [ ] **Anteprime Grafiche:** Visualizzazione di anteprime immagini (tramite protocollo Sixel o Kitty) direttamente all'interno della TUI.
 
