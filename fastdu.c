@@ -637,20 +637,29 @@ static int get_image_dims(const char *path, int *pw, int *ph) {
         *ph = buf[8] | (buf[9] << 8);
         fclose(f); return 1;
     }
-    // JPEG: scan for SOF markers (0xFFC0 - 0xFFC3)
+    // JPEG: scan for SOF markers (0xFFC0 - 0xFFC3) correctly skipping other segments
     if (buf[0] == 0xFF && buf[1] == 0xD8) {
         fseek(f, 2, SEEK_SET);
-        while (fread(buf, 1, 4, f) == 4) {
-            if (buf[0] != 0xFF) break;
-            unsigned short len = (buf[2] << 8) | buf[3];
-            if (buf[1] >= 0xC0 && buf[1] <= 0xC3) {
-                if (fread(buf, 1, 5, f) == 5) {
-                    *ph = (buf[1] << 8) | buf[2];
-                    *pw = (buf[3] << 8) | buf[4];
+        while (1) {
+            unsigned char m[2];
+            if (fread(m, 1, 2, f) != 2) break;
+            if (m[0] != 0xFF) break;
+            if (m[1] == 0xD9 || m[1] == 0xDA) break; // End of image or Start of Scan
+            
+            unsigned char lbuf[2];
+            if (fread(lbuf, 1, 2, f) != 2) break;
+            unsigned short len = (lbuf[0] << 8) | lbuf[1];
+            
+            if (m[1] >= 0xC0 && m[1] <= 0xC3) { // SOF0 - SOF3 markers
+                unsigned char dims[5];
+                if (fread(dims, 1, 5, f) == 5) {
+                    *ph = (dims[1] << 8) | dims[2];
+                    *pw = (dims[3] << 8) | dims[4];
                     fclose(f); return 1;
                 }
                 break;
             }
+            if (len < 2) break;
             fseek(f, len - 2, SEEK_CUR);
         }
     }
