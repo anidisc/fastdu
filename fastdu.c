@@ -61,6 +61,7 @@
 #include <regex.h>
 #include <pwd.h>
 #include <termios.h>
+#include <sys/ioctl.h>
 #include <archive.h>
 #include <archive_entry.h>
 #ifdef __linux__
@@ -613,6 +614,47 @@ static int strcasestr_bool(const char *hay, const char *needle) {
 static const char *path_basename_const(const char *p) {
     const char *slash = strrchr(p, '/');
     return slash ? slash + 1 : p;
+}
+
+// ------------------------------
+// Image Metadata Parser
+// ------------------------------
+static int get_image_dims(const char *path, int *pw, int *ph) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    unsigned char buf[32];
+    if (fread(buf, 1, 32, f) < 24) { fclose(f); return 0; }
+
+    // PNG: [8]signature, [4]length, [4]type="IHDR", [4]width, [4]height
+    if (memcmp(buf, "\x89PNG\r\n\x1a\n", 8) == 0 && memcmp(buf + 12, "IHDR", 4) == 0) {
+        *pw = (buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19];
+        *ph = (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23];
+        fclose(f); return 1;
+    }
+    // GIF: "GIF87a" or "GIF89a", [2]width LE, [2]height LE
+    if (memcmp(buf, "GIF8", 4) == 0) {
+        *pw = buf[6] | (buf[7] << 8);
+        *ph = buf[8] | (buf[9] << 8);
+        fclose(f); return 1;
+    }
+    // JPEG: scan for SOF markers (0xFFC0 - 0xFFC3)
+    if (buf[0] == 0xFF && buf[1] == 0xD8) {
+        fseek(f, 2, SEEK_SET);
+        while (fread(buf, 1, 4, f) == 4) {
+            if (buf[0] != 0xFF) break;
+            unsigned short len = (buf[2] << 8) | buf[3];
+            if (buf[1] >= 0xC0 && buf[1] <= 0xC3) {
+                if (fread(buf, 1, 5, f) == 5) {
+                    *ph = (buf[1] << 8) | buf[2];
+                    *pw = (buf[3] << 8) | buf[4];
+                    fclose(f); return 1;
+                }
+                break;
+            }
+            fseek(f, len - 2, SEEK_CUR);
+        }
+    }
+    fclose(f); return 0;
 }
 
 static int is_image_file(const char *path) {
@@ -3259,7 +3301,7 @@ static void show_image_preview(const char *path) {
     wrefresh(win);
 
     // Try Native Kitty Graphics Protocol (Ghostty, Kitty, WezTerm)
-    int kitty_supported = (getenv("KITTY_WINDOW_ID") != NULL || getenv("GHOSTTY_BIN_DIR") != NULL || getenv("TERM") != NULL && strstr(getenv("TERM"), "kitty") != NULL);
+    int kitty_supported = (getenv("KITTY_WINDOW_ID") != NULL || getenv("GHOSTTY_BIN_DIR") != NULL || (getenv("TERM") != NULL && strstr(getenv("TERM"), "kitty") != NULL));
     
     int shown_natively = 0;
     if (kitty_supported) {
@@ -3273,40 +3315,45 @@ static void show_image_preview(const char *path) {
                 size_t b64_len;
                 char *b64 = base64_encode(buf, fsize, &b64_len);
                 if (b64) {
+                    // Calculate optimal cells to preserve aspect ratio
+                    int img_pw = 0, img_ph = 0;
+                    int final_c = w - 2, final_r = h - 2;
+                    if (get_image_dims(path, &img_pw, &img_ph)) {
+                        struct winsize ws;
+                        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_xpixel > 0) {
+                            double cell_w = (double)ws.ws_xpixel / (double)ws.ws_col;
+                            double cell_h = (double)ws.ws_ypixel / (double)ws.ws_row;
+                            double img_ratio = (double)img_pw / (double)img_ph;
+                            double target_ratio = ((double)(w - 2) * cell_w) / ((double)(h - 2) * cell_h);
+                            if (img_ratio > target_ratio) {
+                                final_c = w - 2;
+                                final_r = (int)(((double)final_c * cell_w) / (img_ratio * cell_h));
+                            } else {
+                                final_r = h - 2;
+                                final_c = (int)(((double)final_r * cell_h * img_ratio) / cell_w);
+                            }
+                        }
+                    }
+
                     def_prog_mode();
                     endwin();
-                    
-                    // Kitty Protocol: a=T (transfer and display), t=d (direct data), f=100 (auto-detect)
-                    // We send data in chunks of 4096 bytes for maximum compatibility
                     const size_t chunk_size = 4096;
                     size_t sent = 0;
-                    
-                    // Position cursor
-                    printf("\033[%d;%dH", y + 2, x + 2);
-                    
+                    int start_x = x + 2 + (w - 2 - final_c) / 2;
+                    int start_y = y + 2 + (h - 2 - final_r) / 2;
+                    printf("\033[%d;%dH", start_y, start_x);
                     while (sent < b64_len) {
                         size_t to_send = b64_len - sent;
                         if (to_send > chunk_size) to_send = chunk_size;
-                        
                         int is_last = (sent + to_send >= b64_len);
-                        
-                        if (sent == 0) {
-                            // First chunk: include header keys
-                            // m=1 if more data follows, m=0 if last
-                            printf("\033_Gq=1,a=T,t=d,f=100,c=%d,r=%d,m=%d;", w-2, h-2, is_last ? 0 : 1);
-                        } else {
-                            // Subsequent chunks: only 'm' key and data
-                            printf("\033_Gm=%d;", is_last ? 0 : 1);
-                        }
-                        
+                        if (sent == 0) printf("\033_Gq=1,a=T,t=d,f=100,c=%d,r=%d,m=%d;", final_c, final_r, is_last ? 0 : 1);
+                        else printf("\033_Gm=%d;", is_last ? 0 : 1);
                         fwrite(b64 + sent, 1, to_send, stdout);
-                        printf("\033\\"); // End of escape sequence
+                        printf("\033\\");
                         sent += to_send;
                     }
-                    
                     printf("\n\033[7m Native Preview (Kitty Protocol) - Press any key to return... \033[0m");
                     fflush(stdout);
-                    
                     struct termios oldt, newt;
                     tcgetattr(STDIN_FILENO, &oldt);
                     newt = oldt;
@@ -3314,8 +3361,6 @@ static void show_image_preview(const char *path) {
                     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
                     (void)getchar();
                     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-                    
-                    // Clear the image from terminal before returning (delete id 1)
                     printf("\033_Ga=d,d=a\033\\"); 
                     reset_prog_mode();
                     refresh();
@@ -3329,7 +3374,6 @@ static void show_image_preview(const char *path) {
     }
 
     if (!shown_natively) {
-        // Fallback to Chafa
         int has_chafa = (system("command -v chafa >/dev/null 2>&1") == 0);
         if (!has_chafa) {
             const char *msg1 = "Error: Terminal graphics not detected.";
@@ -3352,7 +3396,6 @@ static void show_image_preview(const char *path) {
             reset_prog_mode(); refresh();
         }
     }
-
     delwin(win);
 }
 
