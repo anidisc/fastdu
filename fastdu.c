@@ -3346,6 +3346,7 @@ static void show_image_preview(const char *path) {
 
                     def_prog_mode();
                     endwin();
+                    printf("\033[2J\033[H"); fflush(stdout);
                     const size_t chunk_size = 4096;
                     size_t sent = 0;
                     int start_x = x + 2 + (w - 2 - final_c) / 2;
@@ -3371,6 +3372,7 @@ static void show_image_preview(const char *path) {
                     (void)getchar();
                     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
                     printf("\033_Ga=d,d=a\033\\"); 
+                    printf("\033[2J\033[H"); fflush(stdout);
                     reset_prog_mode();
                     refresh();
                     shown_natively = 1;
@@ -3393,6 +3395,7 @@ static void show_image_preview(const char *path) {
             while (1) { int ch = wgetch(win); if (ch == 'q' || ch == 'Q' || ch == 27) break; }
         } else {
             def_prog_mode(); endwin();
+            printf("\033[2J\033[H"); fflush(stdout); // Clear
             printf("\033[%d;%dH", y + 2, x + 2);
             char direct_cmd[PATH_MAX + 256];
             snprintf(direct_cmd, sizeof(direct_cmd), "chafa --size=%dx%d \"%s\"", w - 2, h - 2, path);
@@ -3402,6 +3405,7 @@ static void show_image_preview(const char *path) {
             struct termios oldt, newt;
             tcgetattr(STDIN_FILENO, &oldt); newt = oldt; newt.c_lflag &= ~(ICANON | ECHO);
             tcsetattr(STDIN_FILENO, TCSANOW, &newt); (void)getchar(); tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+            printf("\033[2J\033[H"); fflush(stdout); // Clear
             reset_prog_mode(); refresh();
         }
     }
