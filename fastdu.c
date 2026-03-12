@@ -131,7 +131,7 @@ static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const
 static void cache_remove_prefix(Cache *c, const char *prefix);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.54.0"
+#define FASTDU_VERSION "0.55.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -624,6 +624,35 @@ static int is_image_file(const char *path) {
         strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".webp") == 0 ||
         strcasecmp(ext, ".tiff") == 0 || strcasecmp(ext, ".ico") == 0) return 1;
     return 0;
+}
+
+// ------------------------------
+// Base64 Encoder (for Native Graphics)
+// ------------------------------
+static char *base64_encode(const unsigned char *data, size_t input_length, size_t *output_length) {
+    static const char encoding_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    *output_length = 4 * ((input_length + 2) / 3);
+    char *encoded_data = malloc(*output_length + 1);
+    if (encoded_data == NULL) return NULL;
+
+    for (size_t i = 0, j = 0; i < input_length;) {
+        uint32_t octet_a = i < input_length ? (unsigned char)data[i++] : 0;
+        uint32_t octet_b = i < input_length ? (unsigned char)data[i++] : 0;
+        uint32_t octet_c = i < input_length ? (unsigned char)data[i++] : 0;
+        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
+
+        encoded_data[j++] = encoding_table[(triple >> 3 * 6) & 0x3F];
+        encoded_data[j++] = encoding_table[(triple >> 2 * 6) & 0x3F];
+        encoded_data[j++] = encoding_table[(triple >> 1 * 6) & 0x3F];
+        encoded_data[j++] = encoding_table[(triple >> 0 * 6) & 0x3F];
+    }
+
+    const int mod_table[] = {0, 2, 1};
+    for (int i = 0; i < mod_table[input_length % 3]; i++)
+        encoded_data[*output_length - 1 - i] = '=';
+
+    encoded_data[*output_length] = '\0';
+    return encoded_data;
 }
 
 static int path_exists(const char *p) {
@@ -3229,48 +3258,74 @@ static void show_image_preview(const char *path) {
     wattroff(win, A_REVERSE | A_BOLD);
     wrefresh(win);
 
-    // Check if chafa is installed
-    int has_chafa = (system("command -v chafa >/dev/null 2>&1") == 0);
-
-    if (!has_chafa) {
-        const char *msg1 = "Error: 'chafa' not found on system.";
-        const char *msg2 = "Install it to see high-quality image previews.";
-        int m1x = (w > (int)strlen(msg1)) ? (w - (int)strlen(msg1)) / 2 : 1;
-        int m2x = (w > (int)strlen(msg2)) ? (w - (int)strlen(msg2)) / 2 : 1;
-        mvwprintw(win, h/2, m1x, "%s", msg1);
-        mvwprintw(win, h/2 + 1, m2x, "%s", msg2);
-        wrefresh(win);
-        
-        while (1) {
-            int ch = wgetch(win);
-            if (ch == 'q' || ch == 'Q' || ch == 27) break;
+    // Try Native Kitty Graphics Protocol (Ghostty, Kitty, WezTerm)
+    int kitty_supported = (getenv("KITTY_WINDOW_ID") != NULL || getenv("GHOSTTY_BIN_DIR") != NULL || getenv("TERM") != NULL && strstr(getenv("TERM"), "kitty") != NULL);
+    
+    int shown_natively = 0;
+    if (kitty_supported) {
+        FILE *fimg = fopen(path, "rb");
+        if (fimg) {
+            fseek(fimg, 0, SEEK_END);
+            long fsize = ftell(fimg);
+            fseek(fimg, 0, SEEK_SET);
+            unsigned char *buf = malloc(fsize);
+            if (buf && fread(buf, 1, fsize, fimg) == (size_t)fsize) {
+                size_t b64_len;
+                char *b64 = base64_encode(buf, fsize, &b64_len);
+                if (b64) {
+                    def_prog_mode();
+                    endwin();
+                    // Kitty Protocol: a=T (transfer), t=d (direct), f=100 (auto-detect format)
+                    // c,r: target cells. m=1: scale to fit (preserve aspect ratio)
+                    printf("\033[%d;%dH", y + 2, x + 2);
+                    printf("\033_Gq=1,a=T,t=d,f=100,c=%d,r=%d,m=1;%s\033\\", w-2, h-2, b64);
+                    printf("\n\033[7m Native Preview (Kitty Protocol) - Press any key to return... \033[0m");
+                    fflush(stdout);
+                    
+                    struct termios oldt, newt;
+                    tcgetattr(STDIN_FILENO, &oldt);
+                    newt = oldt;
+                    newt.c_lflag &= ~(ICANON | ECHO);
+                    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+                    (void)getchar();
+                    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+                    
+                    // Clear the image from terminal before returning (delete id 1)
+                    printf("\033_Ga=d,d=a\033\\"); 
+                    reset_prog_mode();
+                    refresh();
+                    shown_natively = 1;
+                    free(b64);
+                }
+                free(buf);
+            }
+            fclose(fimg);
         }
-    } else {
-        // Run chafa using the 'pause ncurses' method
-        def_prog_mode();
-        endwin();
-        
-        // Re-run chafa directly to stdout in the specific area
-        char direct_cmd[PATH_MAX + 256];
-        // Move cursor to approximate center of our window area
-        printf("\033[%d;%dH", y + 2, x + 2); 
-        snprintf(direct_cmd, sizeof(direct_cmd), "chafa --size=%dx%d \"%s\"", w - 2, h - 2, path);
-        system(direct_cmd);
-        
-        printf("\n\033[7m Press any key to return to fastdu... \033[0m");
-        fflush(stdout);
-        
-        // Wait for input without ncurses
-        struct termios oldt, newt;
-        tcgetattr(STDIN_FILENO, &oldt);
-        newt = oldt;
-        newt.c_lflag &= ~(ICANON | ECHO);
-        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-        (void)getchar();
-        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-        
-        reset_prog_mode();
-        refresh();
+    }
+
+    if (!shown_natively) {
+        // Fallback to Chafa
+        int has_chafa = (system("command -v chafa >/dev/null 2>&1") == 0);
+        if (!has_chafa) {
+            const char *msg1 = "Error: Terminal graphics not detected.";
+            const char *msg2 = "Install 'chafa' for universal image support.";
+            mvwprintw(win, h/2, (w-(int)strlen(msg1))/2, "%s", msg1);
+            mvwprintw(win, h/2 + 1, (w-(int)strlen(msg2))/2, "%s", msg2);
+            wrefresh(win);
+            while (1) { int ch = wgetch(win); if (ch == 'q' || ch == 'Q' || ch == 27) break; }
+        } else {
+            def_prog_mode(); endwin();
+            printf("\033[%d;%dH", y + 2, x + 2);
+            char direct_cmd[PATH_MAX + 256];
+            snprintf(direct_cmd, sizeof(direct_cmd), "chafa --size=%dx%d \"%s\"", w - 2, h - 2, path);
+            system(direct_cmd);
+            printf("\n\033[7m Chafa Preview - Press any key to return... \033[0m");
+            fflush(stdout);
+            struct termios oldt, newt;
+            tcgetattr(STDIN_FILENO, &oldt); newt = oldt; newt.c_lflag &= ~(ICANON | ECHO);
+            tcsetattr(STDIN_FILENO, TCSANOW, &newt); (void)getchar(); tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+            reset_prog_mode(); refresh();
+        }
     }
 
     delwin(win);
