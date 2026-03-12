@@ -3275,10 +3275,35 @@ static void show_image_preview(const char *path) {
                 if (b64) {
                     def_prog_mode();
                     endwin();
-                    // Kitty Protocol: a=T (transfer), t=d (direct), f=100 (auto-detect format)
-                    // c,r: target cells. m=1: scale to fit (preserve aspect ratio)
+                    
+                    // Kitty Protocol: a=T (transfer and display), t=d (direct data), f=100 (auto-detect)
+                    // We send data in chunks of 4096 bytes for maximum compatibility
+                    const size_t chunk_size = 4096;
+                    size_t sent = 0;
+                    
+                    // Position cursor
                     printf("\033[%d;%dH", y + 2, x + 2);
-                    printf("\033_Gq=1,a=T,t=d,f=100,c=%d,r=%d,m=1;%s\033\\", w-2, h-2, b64);
+                    
+                    while (sent < b64_len) {
+                        size_t to_send = b64_len - sent;
+                        if (to_send > chunk_size) to_send = chunk_size;
+                        
+                        int is_last = (sent + to_send >= b64_len);
+                        
+                        if (sent == 0) {
+                            // First chunk: include header keys
+                            // m=1 if more data follows, m=0 if last
+                            printf("\033_Gq=1,a=T,t=d,f=100,c=%d,r=%d,m=%d;", w-2, h-2, is_last ? 0 : 1);
+                        } else {
+                            // Subsequent chunks: only 'm' key and data
+                            printf("\033_Gm=%d;", is_last ? 0 : 1);
+                        }
+                        
+                        fwrite(b64 + sent, 1, to_send, stdout);
+                        printf("\033\\"); // End of escape sequence
+                        sent += to_send;
+                    }
+                    
                     printf("\n\033[7m Native Preview (Kitty Protocol) - Press any key to return... \033[0m");
                     fflush(stdout);
                     
