@@ -3330,16 +3330,19 @@ static void show_image_preview(const char *path) {
 
     // Try Native Kitty Graphics Protocol (Ghostty, Kitty, WezTerm)
     int kitty_supported = (getenv("KITTY_WINDOW_ID") != NULL || getenv("GHOSTTY_BIN_DIR") != NULL || (getenv("TERM") != NULL && strstr(getenv("TERM"), "kitty") != NULL));
+
+    // Detect if it's a PNG
+    const char *ext = strrchr(path, '.');
+    int is_png = (ext && strcasecmp(ext, ".png") == 0);
+    int has_chafa = (system("command -v chafa >/dev/null 2>&1") == 0);
+
+    int shown = 0;
     
-    int shown_natively = 0;
-    if (kitty_supported) {
-        // Use t=f (path transfer) for maximum format support and performance
-        // Path must be Base64 encoded. We use the absolute path.
+    // 1. If it's a PNG, use native Path Transfer (Fastest)
+    if (is_png && kitty_supported) {
         size_t b64_len;
         char *b64_path = base64_encode((const unsigned char *)path, strlen(path), &b64_len);
-        
         if (b64_path) {
-            // Calculate optimal cells to preserve aspect ratio
             int img_pw = 0, img_ph = 0;
             int final_c = w - 2, final_r = h - 2;
             if (get_image_dims(path, &img_pw, &img_ph)) {
@@ -3349,73 +3352,54 @@ static void show_image_preview(const char *path) {
                     double cell_h = (double)ws.ws_ypixel / (double)ws.ws_row;
                     double img_ratio = (double)img_pw / (double)img_ph;
                     double target_ratio = ((double)(w - 2) * cell_w) / ((double)(h - 2) * cell_h);
-                    if (img_ratio > target_ratio) {
-                        final_c = w - 2;
-                        final_r = (int)(((double)final_c * cell_w) / (img_ratio * cell_h));
-                    } else {
-                        final_r = h - 2;
-                        final_c = (int)(((double)final_r * cell_h * img_ratio) / cell_w);
-                    }
+                    if (img_ratio > target_ratio) { final_c = w - 2; final_r = (int)(((double)final_c * cell_w) / (img_ratio * cell_h)); }
+                    else { final_r = h - 2; final_c = (int)(((double)final_r * cell_h * img_ratio) / cell_w); }
                 }
             }
-
-            def_prog_mode();
-            endwin();
-            printf("\033[2J\033[H"); fflush(stdout); // Clear screen
-
-            // Position cursor (centered in the window area)
+            def_prog_mode(); endwin();
+            printf("\033[2J\033[H");
             int start_x = x + 2 + (w - 2 - final_c) / 2;
             int start_y = y + 2 + (h - 2 - final_r) / 2;
             printf("\033[%d;%dH", start_y, start_x);
-            
-            // a=T (transfer/display), t=f (file path), f=100 (auto), c,r (target cells)
-            // No chunking needed for path transfer
             printf("\033_Gq=1,a=T,t=f,f=100,c=%d,r=%d;%s\033\\", final_c, final_r, b64_path);
-            
-            printf("\n\033[7m Native Preview (Kitty Protocol) - Press any key to return... \033[0m");
-            fflush(stdout);
-            
-            struct termios oldt, newt;
-            tcgetattr(STDIN_FILENO, &oldt);
-            newt = oldt;
-            newt.c_lflag &= ~(ICANON | ECHO);
-            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-            (void)getchar();
-            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-            
-            printf("\033_Ga=d,d=a\033\\"); 
-            printf("\033[2J\033[H"); fflush(stdout);
-            reset_prog_mode();
-            refresh();
-            shown_natively = 1;
-            free(b64_path);
-        }
-    }
-
-    if (!shown_natively) {
-        int has_chafa = (system("command -v chafa >/dev/null 2>&1") == 0);
-        if (!has_chafa) {
-            const char *msg1 = "Error: Terminal graphics not detected.";
-            const char *msg2 = "Install 'chafa' for universal image support.";
-            mvwprintw(win, h/2, (w-(int)strlen(msg1))/2, "%s", msg1);
-            mvwprintw(win, h/2 + 1, (w-(int)strlen(msg2))/2, "%s", msg2);
-            wrefresh(win);
-            while (1) { int ch = wgetch(win); if (ch == 'q' || ch == 'Q' || ch == 27) break; }
-        } else {
-            def_prog_mode(); endwin();
-            printf("\033[2J\033[H"); fflush(stdout); // Clear
-            printf("\033[%d;%dH", y + 2, x + 2);
-            char direct_cmd[PATH_MAX + 256];
-            snprintf(direct_cmd, sizeof(direct_cmd), "chafa --size=%dx%d \"%s\"", w - 2, h - 2, path);
-            system(direct_cmd);
-            printf("\n\033[7m Chafa Preview - Press any key to return... \033[0m");
+            printf("\n\033[7m Native PNG Preview - Press any key... \033[0m");
             fflush(stdout);
             struct termios oldt, newt;
             tcgetattr(STDIN_FILENO, &oldt); newt = oldt; newt.c_lflag &= ~(ICANON | ECHO);
             tcsetattr(STDIN_FILENO, TCSANOW, &newt); (void)getchar(); tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-            printf("\033[2J\033[H"); fflush(stdout); // Clear
-            reset_prog_mode(); refresh();
+            printf("\033_Ga=d,d=a\033\\"); printf("\033[2J\033[H"); reset_prog_mode(); refresh();
+            shown = 1; free(b64_path);
         }
+    } 
+    
+    // 2. If not shown yet (not PNG or no native support), use Chafa if available
+    // Chafa is great because it will convert JPG/WebP/etc to Kitty Protocol automatically!
+    if (!shown && has_chafa) {
+        def_prog_mode();
+        endwin();
+        printf("\033[2J\033[H");
+        printf("\033[%d;%dH", y + 2, x + 2);
+        char direct_cmd[PATH_MAX + 256];
+        // Tell chafa to use the best available protocol (kitty, sixel, or symbols)
+        snprintf(direct_cmd, sizeof(direct_cmd), "chafa --size=%dx%d \"%s\"", w - 2, h - 2, path);
+        system(direct_cmd);
+        printf("\n\033[7m Image Preview (via Chafa) - Press any key... \033[0m");
+        fflush(stdout);
+        struct termios oldt, newt;
+        tcgetattr(STDIN_FILENO, &oldt); newt = oldt; newt.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt); (void)getchar(); tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        printf("\033[2J\033[H"); reset_prog_mode(); refresh();
+        shown = 1;
+    }
+
+    // 3. Last resort: error message
+    if (!shown) {
+        const char *msg1 = "Error: Cannot display this format natively.";
+        const char *msg2 = "Install 'chafa' for JPG/WebP/GIF support.";
+        mvwprintw(win, h/2, (w-(int)strlen(msg1))/2, "%s", msg1);
+        mvwprintw(win, h/2 + 1, (w-(int)strlen(msg2))/2, "%s", msg2);
+        wrefresh(win);
+        while (1) { int ch = wgetch(win); if (ch == 'q' || ch == 'Q' || ch == 27) break; }
     }
     delwin(win);
 }
