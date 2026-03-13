@@ -637,6 +637,25 @@ static int get_image_dims(const char *path, int *pw, int *ph) {
         *ph = buf[8] | (buf[9] << 8);
         fclose(f); return 1;
     }
+    // BMP: "BM", width at 18, height at 22 (int32)
+    if (buf[0] == 'B' && buf[1] == 'M') {
+        *pw = (int)(buf[18] | (buf[19] << 8) | (buf[20] << 16) | (buf[21] << 24));
+        *ph = (int)(buf[22] | (buf[23] << 8) | (buf[24] << 16) | (buf[25] << 24));
+        if (*ph < 0) *ph = -*ph;
+        fclose(f); return 1;
+    }
+    // WebP: "RIFF" .... "WEBP"
+    if (memcmp(buf, "RIFF", 4) == 0 && memcmp(buf + 8, "WEBP", 4) == 0) {
+        if (memcmp(buf + 12, "VP8 ", 4) == 0) { // Lossy
+            *pw = buf[26] | ((buf[27] & 0x3f) << 8);
+            *ph = buf[28] | ((buf[29] & 0x3f) << 8);
+            fclose(f); return 1;
+        } else if (memcmp(buf + 12, "VP8L", 4) == 0) { // Lossless
+            *pw = 1 + (buf[21] | ((buf[22] & 0x3f) << 8));
+            *ph = 1 + (((buf[22] & 0xc0) >> 6) | (buf[23] << 2) | ((buf[24] & 0x03) << 10));
+            fclose(f); return 1;
+        }
+    }
     // JPEG: scan for SOF markers (0xFFC0 - 0xFFC3) correctly skipping other segments
     if (buf[0] == 0xFF && buf[1] == 0xD8) {
         fseek(f, 2, SEEK_SET);
@@ -3314,73 +3333,62 @@ static void show_image_preview(const char *path) {
     
     int shown_natively = 0;
     if (kitty_supported) {
-        FILE *fimg = fopen(path, "rb");
-        if (fimg) {
-            fseek(fimg, 0, SEEK_END);
-            long fsize = ftell(fimg);
-            fseek(fimg, 0, SEEK_SET);
-            unsigned char *buf = malloc(fsize);
-            if (buf && fread(buf, 1, fsize, fimg) == (size_t)fsize) {
-                size_t b64_len;
-                char *b64 = base64_encode(buf, fsize, &b64_len);
-                if (b64) {
-                    // Calculate optimal cells to preserve aspect ratio
-                    int img_pw = 0, img_ph = 0;
-                    int final_c = w - 2, final_r = h - 2;
-                    if (get_image_dims(path, &img_pw, &img_ph)) {
-                        struct winsize ws;
-                        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_xpixel > 0) {
-                            double cell_w = (double)ws.ws_xpixel / (double)ws.ws_col;
-                            double cell_h = (double)ws.ws_ypixel / (double)ws.ws_row;
-                            double img_ratio = (double)img_pw / (double)img_ph;
-                            double target_ratio = ((double)(w - 2) * cell_w) / ((double)(h - 2) * cell_h);
-                            if (img_ratio > target_ratio) {
-                                final_c = w - 2;
-                                final_r = (int)(((double)final_c * cell_w) / (img_ratio * cell_h));
-                            } else {
-                                final_r = h - 2;
-                                final_c = (int)(((double)final_r * cell_h * img_ratio) / cell_w);
-                            }
-                        }
+        // Use t=f (path transfer) for maximum format support and performance
+        // Path must be Base64 encoded. We use the absolute path.
+        size_t b64_len;
+        char *b64_path = base64_encode((const unsigned char *)path, strlen(path), &b64_len);
+        
+        if (b64_path) {
+            // Calculate optimal cells to preserve aspect ratio
+            int img_pw = 0, img_ph = 0;
+            int final_c = w - 2, final_r = h - 2;
+            if (get_image_dims(path, &img_pw, &img_ph)) {
+                struct winsize ws;
+                if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_xpixel > 0) {
+                    double cell_w = (double)ws.ws_xpixel / (double)ws.ws_col;
+                    double cell_h = (double)ws.ws_ypixel / (double)ws.ws_row;
+                    double img_ratio = (double)img_pw / (double)img_ph;
+                    double target_ratio = ((double)(w - 2) * cell_w) / ((double)(h - 2) * cell_h);
+                    if (img_ratio > target_ratio) {
+                        final_c = w - 2;
+                        final_r = (int)(((double)final_c * cell_w) / (img_ratio * cell_h));
+                    } else {
+                        final_r = h - 2;
+                        final_c = (int)(((double)final_r * cell_h * img_ratio) / cell_w);
                     }
-
-                    def_prog_mode();
-                    endwin();
-                    printf("\033[2J\033[H"); fflush(stdout);
-                    const size_t chunk_size = 4096;
-                    size_t sent = 0;
-                    int start_x = x + 2 + (w - 2 - final_c) / 2;
-                    int start_y = y + 2 + (h - 2 - final_r) / 2;
-                    printf("\033[%d;%dH", start_y, start_x);
-                    while (sent < b64_len) {
-                        size_t to_send = b64_len - sent;
-                        if (to_send > chunk_size) to_send = chunk_size;
-                        int is_last = (sent + to_send >= b64_len);
-                        if (sent == 0) printf("\033_Gq=1,a=T,t=d,f=100,c=%d,r=%d,m=%d;", final_c, final_r, is_last ? 0 : 1);
-                        else printf("\033_Gm=%d;", is_last ? 0 : 1);
-                        fwrite(b64 + sent, 1, to_send, stdout);
-                        printf("\033\\");
-                        sent += to_send;
-                    }
-                    printf("\n\033[7m Native Preview (Kitty Protocol) - Press any key to return... \033[0m");
-                    fflush(stdout);
-                    struct termios oldt, newt;
-                    tcgetattr(STDIN_FILENO, &oldt);
-                    newt = oldt;
-                    newt.c_lflag &= ~(ICANON | ECHO);
-                    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-                    (void)getchar();
-                    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-                    printf("\033_Ga=d,d=a\033\\"); 
-                    printf("\033[2J\033[H"); fflush(stdout);
-                    reset_prog_mode();
-                    refresh();
-                    shown_natively = 1;
-                    free(b64);
                 }
-                free(buf);
             }
-            fclose(fimg);
+
+            def_prog_mode();
+            endwin();
+            printf("\033[2J\033[H"); fflush(stdout); // Clear screen
+
+            // Position cursor (centered in the window area)
+            int start_x = x + 2 + (w - 2 - final_c) / 2;
+            int start_y = y + 2 + (h - 2 - final_r) / 2;
+            printf("\033[%d;%dH", start_y, start_x);
+            
+            // a=T (transfer/display), t=f (file path), f=100 (auto), c,r (target cells)
+            // No chunking needed for path transfer
+            printf("\033_Gq=1,a=T,t=f,f=100,c=%d,r=%d;%s\033\\", final_c, final_r, b64_path);
+            
+            printf("\n\033[7m Native Preview (Kitty Protocol) - Press any key to return... \033[0m");
+            fflush(stdout);
+            
+            struct termios oldt, newt;
+            tcgetattr(STDIN_FILENO, &oldt);
+            newt = oldt;
+            newt.c_lflag &= ~(ICANON | ECHO);
+            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+            (void)getchar();
+            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+            
+            printf("\033_Ga=d,d=a\033\\"); 
+            printf("\033[2J\033[H"); fflush(stdout);
+            reset_prog_mode();
+            refresh();
+            shown_natively = 1;
+            free(b64_path);
         }
     }
 
