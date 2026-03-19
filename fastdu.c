@@ -4839,6 +4839,21 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                         }
                         cache_save(root, &cache);
                     }
+                } else {
+                    // Single file refresh
+                    struct stat st;
+                    if (lstat(ve->abs_path, &st) == 0 && S_ISREG(st.st_mode)) {
+                        unsigned long long old_sz = ve->size;
+                        unsigned long long new_sz = file_size_bytes(&st);
+                        long long delta = (long long)new_sz - (long long)old_sz;
+                        if (delta != 0) {
+                            cache_upsert_with_meta(&cache, root, ve->abs_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                            if (delta > 0) cache_add_ancestors_after_delta(&cache, root, ve->abs_path, (unsigned long long)delta);
+                            else cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
+                            g_last_bytes += delta;
+                        }
+                        cache_save(root, &cache);
+                    }
                 }
                 // rebuild and reselect same path
                 size_t old_selected = dv.selected;
