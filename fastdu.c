@@ -4811,36 +4811,44 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                 if (ve->is_dir) {
                     // compute old size and preserve current global total
                     unsigned long long old_sz = 0ULL; cache_get_info(&cache, ve->abs_path, &old_sz, NULL, NULL);
-                    unsigned long long prev_total = g_last_bytes;
-                    // compute old files count for delta adjustment
                     unsigned long long old_files = count_files_path(ve->abs_path);
+                    unsigned long long prev_global_bytes = g_last_bytes;
+                    unsigned long long prev_global_files = g_last_files;
+
                     // duplicate scan path to avoid relying on dv memory
                     char *scan_path = xstrdup(ve->abs_path);
                     if (scan_path) {
                         int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
                         if (threads < 1) threads = 1;
                         if (threads > 64) threads = 64;
-                        (void)scan_dir_parallel_deep(scan_path, cache_abs, &cache, threads);
-                        free(scan_path);
-                        // compute delta and adjust ancestors
-                        unsigned long long new_sz = 0ULL; cache_get_info(&cache, ve->abs_path, &new_sz, NULL, NULL);
-                        long long delta = (long long)new_sz - (long long)old_sz;
-                        if (delta > 0) cache_add_ancestors_after_delta(&cache, root, ve->abs_path, (unsigned long long)delta);
-                        else if (delta < 0) cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
-                        // restore footer total by applying delta to previous total (partial scan overwrote it)
-                        if (delta >= 0) g_last_bytes = prev_total + (unsigned long long)delta;
-                        else { unsigned long long dec = (unsigned long long)(-delta); g_last_bytes = (prev_total > dec) ? (prev_total - dec) : 0ULL; }
-                        // adjust global files by delta between new and old subtree file counts
-                        unsigned long long new_files = count_files_path(ve->abs_path);
-                        if (new_files >= old_files) g_last_files += (new_files - old_files);
-                        else {
-                            unsigned long long decf = old_files - new_files;
-                            if (g_last_files > decf) g_last_files -= decf; else g_last_files = 0ULL;
+                        // Execute scan (updates subdirectories in cache)
+                        unsigned long long new_sz = scan_dir_parallel_deep(scan_path, cache_abs, &cache, threads);
+                        
+                        // Explicitly update the scanned directory metadata in cache
+                        struct stat st;
+                        if (lstat(scan_path, &st) == 0) {
+                            cache_upsert_with_meta(&cache, root, scan_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
                         }
+
+                        // Compute deltas
+                        long long delta_sz = (long long)new_sz - (long long)old_sz;
+                        unsigned long long new_files = count_files_path(scan_path);
+                        long long delta_fl = (long long)new_files - (long long)old_files;
+
+                        // Restore and adjust global totals
+                        g_last_bytes = (unsigned long long)((long long)prev_global_bytes + delta_sz);
+                        g_last_files = (unsigned long long)((long long)prev_global_files + delta_fl);
+
+                        // Propagate delta to ancestors in cache
+                        if (delta_sz > 0) cache_add_ancestors_after_delta(&cache, root, scan_path, (unsigned long long)delta_sz);
+                        else if (delta_sz < 0) cache_adjust_ancestors_after_delta(&cache, root, scan_path, (long long)(-delta_sz));
+
+                        // Persist to disk immediately
                         cache_save(root, &cache);
+                        free(scan_path);
                     }
                 } else {
-                    // Single file refresh
+                    // Single file refresh logic
                     struct stat st;
                     if (lstat(ve->abs_path, &st) == 0 && S_ISREG(st.st_mode)) {
                         unsigned long long old_sz = ve->size;
@@ -4850,7 +4858,7 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                             cache_upsert_with_meta(&cache, root, ve->abs_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
                             if (delta > 0) cache_add_ancestors_after_delta(&cache, root, ve->abs_path, (unsigned long long)delta);
                             else cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
-                            g_last_bytes += delta;
+                            g_last_bytes = (unsigned long long)((long long)g_last_bytes + delta);
                         }
                         cache_save(root, &cache);
                     }
