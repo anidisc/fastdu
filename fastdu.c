@@ -4858,6 +4858,22 @@ int rows, cols; getmaxyx(stdscr, rows, cols);
                 if (sel_path) free(sel_path);
             }
         } else if (ch == 'R') {
+            // Full rescan of current directory (parallel)
+            char *scan_path = xstrdup(current);
+            if (scan_path) {
+                int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
+                if (threads < 1) threads = 1;
+                if (threads > 64) threads = 64;
+                (void)scan_dir_parallel_deep(scan_path, cache_abs, &cache, threads);
+                free(scan_path);
+                
+                // Update global totals if we scanned from root or adjust current state
+                unsigned long long new_root_sz = 0ULL;
+                if (cache_get_info(&cache, root, &new_root_sz, NULL, NULL)) {
+                    g_last_bytes = new_root_sz;
+                }
+                cache_save(root, &cache);
+            }
             view_free(&dv);
             build_dir_view(current, root, &cache, &dv);
         } else if (ch == ' ') {
