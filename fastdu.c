@@ -958,31 +958,53 @@ static void cache_update_size(Cache *c, const char *abs_path, long long delta, t
 static int cache_save(const char *root, const Cache *c) {
     char *cache_path = path_join(root, CACHE_FILENAME);
     if (!cache_path) return -1;
-    FILE *f = fopen(cache_path, "w");
+    
+    // Create a temporary file first
+    char temp_path[PATH_MAX];
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp", cache_path);
+    
+    FILE *f = fopen(temp_path, "w");
     if (!f) { free(cache_path); return -1; }
+    
     fprintf(f, "# fastdu-cache v3\n");
     fprintf(f, "root\t%s\n", root);
-    // totals: write root total bytes and global files if available
+    
+    // Get total size of root from cache
     unsigned long long total_bytes = 0ULL;
     cache_get_info((Cache*)c, root, &total_bytes, NULL, NULL);
     fprintf(f, "totals\t%llu\n", (unsigned long long)total_bytes);
     fprintf(f, "totals_files\t%llu\n", (unsigned long long)g_last_files);
+
     for (int i = 0; i < CACHE_SHARDS; i++) {
         pthread_mutex_lock((pthread_mutex_t*)&c->shards[i].mu);
         for (size_t j = 0; j < c->shards[i].n; j++) {
-            char *enc = pct_encode(c->shards[i].v[j].rel_path ? c->shards[i].v[j].rel_path : ".");
-            if (!enc) continue;
+            CacheEntry *e = &c->shards[i].v[j];
+            // Ensure we have a valid relative path for every entry
+            char *rel = relpath_from_abs(root, e->abs_path);
+            char *enc = pct_encode(rel ? rel : ".");
+            
             fprintf(f, "D\t%s\t%llu\t%ld\t%llu\t%ld\n",
                     enc,
-                    (unsigned long long)c->shards[i].v[j].size,
-                    (long)c->shards[i].v[j].last_scan,
-                    (unsigned long long)c->shards[i].v[j].ino,
-                    (long)c->shards[i].v[j].dir_mtime);
+                    (unsigned long long)e->size,
+                    (long)e->last_scan,
+                    (unsigned long long)e->ino,
+                    (long)e->dir_mtime);
+            
             free(enc);
+            free(rel);
         }
         pthread_mutex_unlock((pthread_mutex_t*)&c->shards[i].mu);
     }
+    
     fclose(f);
+    
+    // Rename temp to real cache file
+    if (rename(temp_path, cache_path) != 0) {
+        unlink(temp_path);
+        free(cache_path);
+        return -1;
+    }
+    
     free(cache_path);
     return 0;
 }
@@ -4304,10 +4326,6 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     mvhline(rows-1, 0, ' ', cols);
     refresh();
 
-    // Snapshot totals for footer
-    g_last_files = atomic_load(&g_total_files);
-    g_last_bytes = atomic_load(&g_total_bytes);
-
     unsigned long long rs = 0ULL;
     cache_get_info(cache, root, &rs, NULL, NULL);
     return rs;
@@ -4546,6 +4564,13 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
             if (threads < 1) threads = 1;
             if (threads > 64) threads = 64;
             (void)scan_dir_parallel_deep(root, cache_abs, &cache, threads);
+            
+            // Sync footer totals from fresh scan
+            unsigned long long rs = 0ULL;
+            if (cache_get_info(&cache, root, &rs, NULL, NULL)) {
+                g_last_bytes = rs;
+            }
+            g_last_files = count_files_path(root);
         }
         cache_save(root, &cache);
         if (!headless) {
@@ -5436,7 +5461,14 @@ draw_status("No items marked.");
     // Cleanup
     endwin();
     view_free(&dv);
-    cache_save(root, &cache);
+    
+    // FINAL DUMP: Overwrite cache file with current memory state
+    if (cache_save(root, &cache) == 0) {
+        if (debug_all) fprintf(stderr, "[cleanup] Cache saved successfully to %s\n", root);
+    } else {
+        fprintf(stderr, "[cleanup] Error saving cache to %s\n", root);
+    }
+
     cache_free(&cache);
     if (g_diff_mode) cache_free(&g_snapshot_cache);
     if (g_regex_enabled) { regfree(&g_regex); g_regex_enabled = 0; }
