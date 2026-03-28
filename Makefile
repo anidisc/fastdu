@@ -13,7 +13,7 @@ else
     CFLAGS = -O2 -Wall -Wextra -pedantic -std=c11 $(EXTRA_CFLAGS)
 endif
 
-LDFLAGS = -lncursesw -lpthread -luring -larchive
+LDFLAGS = -lncursesw -lpthread -luring -larchive -lzstd
 
 all: $(TARGET)
 

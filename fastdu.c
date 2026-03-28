@@ -64,6 +64,7 @@
 #include <sys/ioctl.h>
 #include <archive.h>
 #include <archive_entry.h>
+#include <zstd.h>
 #ifdef __linux__
 #include <linux/stat.h>
 #include <liburing.h>
@@ -959,52 +960,64 @@ static int cache_save(const char *root, const Cache *c) {
     char *cache_path = path_join(root, CACHE_FILENAME);
     if (!cache_path) return -1;
     
-    // Create a temporary file first
-    char temp_path[PATH_MAX];
-    snprintf(temp_path, sizeof(temp_path), "%s.tmp", cache_path);
+    size_t cap = 1024 * 1024; // 1MB initial
+    char *buf = malloc(cap);
+    if (!buf) { free(cache_path); return -1; }
+    size_t off = 0;
+
+    #define APPEND_BUF(...) do { \
+        char _tmp[PATH_MAX + 512]; \
+        int _len = snprintf(_tmp, sizeof(_tmp), __VA_ARGS__); \
+        if (off + _len >= cap) { \
+            cap *= 2; \
+            char *_nb = realloc(buf, cap); \
+            if (!_nb) { free(buf); free(cache_path); return -1; } \
+            buf = _nb; \
+        } \
+        memcpy(buf + off, _tmp, _len); \
+        off += _len; \
+    } while(0)
+
+    APPEND_BUF("# fastdu-cache v3\n");
+    APPEND_BUF("root\t%s\n", root);
     
-    FILE *f = fopen(temp_path, "w");
-    if (!f) { free(cache_path); return -1; }
-    
-    fprintf(f, "# fastdu-cache v3\n");
-    fprintf(f, "root\t%s\n", root);
-    
-    // Get total size of root from cache
     unsigned long long total_bytes = 0ULL;
     cache_get_info((Cache*)c, root, &total_bytes, NULL, NULL);
-    fprintf(f, "totals\t%llu\n", (unsigned long long)total_bytes);
-    fprintf(f, "totals_files\t%llu\n", (unsigned long long)g_last_files);
+    APPEND_BUF("totals\t%llu\n", (unsigned long long)total_bytes);
+    APPEND_BUF("totals_files\t%llu\n", (unsigned long long)g_last_files);
 
     for (int i = 0; i < CACHE_SHARDS; i++) {
         pthread_mutex_lock((pthread_mutex_t*)&c->shards[i].mu);
         for (size_t j = 0; j < c->shards[i].n; j++) {
             CacheEntry *e = &c->shards[i].v[j];
-            // Ensure we have a valid relative path for every entry
             char *rel = relpath_from_abs(root, e->abs_path);
             char *enc = pct_encode(rel ? rel : ".");
-            
-            fprintf(f, "D\t%s\t%llu\t%ld\t%llu\t%ld\n",
-                    enc,
-                    (unsigned long long)e->size,
-                    (long)e->last_scan,
-                    (unsigned long long)e->ino,
-                    (long)e->dir_mtime);
-            
-            free(enc);
-            free(rel);
+            APPEND_BUF("D\t%s\t%llu\t%ld\t%llu\t%ld\n",
+                    enc, (unsigned long long)e->size, (long)e->last_scan,
+                    (unsigned long long)e->ino, (long)e->dir_mtime);
+            free(enc); free(rel);
         }
         pthread_mutex_unlock((pthread_mutex_t*)&c->shards[i].mu);
     }
-    
+
+    // Now compress the buffer
+    size_t c_cap = ZSTD_compressBound(off);
+    void *c_buf = malloc(c_cap);
+    if (!c_buf) { free(buf); free(cache_path); return -1; }
+
+    size_t c_sz = ZSTD_compress(c_buf, c_cap, buf, off, 3);
+    if (ZSTD_isError(c_sz)) { free(buf); free(c_buf); free(cache_path); return -1; }
+
+    char temp_path[PATH_MAX];
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp", cache_path);
+    FILE *f = fopen(temp_path, "wb");
+    if (!f) { free(buf); free(c_buf); free(cache_path); return -1; }
+    fwrite(c_buf, 1, c_sz, f);
     fclose(f);
-    
-    // Rename temp to real cache file
-    if (rename(temp_path, cache_path) != 0) {
-        unlink(temp_path);
-        free(cache_path);
-        return -1;
-    }
-    
+    rename(temp_path, cache_path);
+
+    free(buf);
+    free(c_buf);
     free(cache_path);
     return 0;
 }
@@ -1113,105 +1126,118 @@ static void cache_copy(Cache *dst, Cache *src) {
 static int cache_load_file(const char *cache_path_in, const char *root, Cache *c) {
     char *cache_path = xstrdup(cache_path_in);
     if (!cache_path) return -1;
-    FILE *f = fopen(cache_path, "r");
-    int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
-    if (debug_cache) fprintf(stderr, "[cache] open %s\n", cache_path);
-    if (!f) { free(cache_path); return 0; } // no cache file, not an error
+    FILE *f = fopen(cache_path, "rb");
+    if (!f) { free(cache_path); return 0; }
 
-    // Determine file size for progress
-    long total_bytes = 0;
-    if (fseek(f, 0, SEEK_END) == 0) {
-        long pos = ftell(f);
-        if (pos > 0) total_bytes = pos;
-        fseek(f, 0, SEEK_SET);
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0) { fclose(f); free(cache_path); return 0; }
+    
+    unsigned char *fbuf = malloc(fsize);
+    if (!fbuf) { fclose(f); free(cache_path); return -1; }
+    if (fread(fbuf, 1, fsize, f) != (size_t)fsize) { free(fbuf); fclose(f); free(cache_path); return -1; }
+    fclose(f);
+
+    unsigned char *data = fbuf;
+    size_t data_sz = fsize;
+    void *decomp_buf = NULL;
+
+    // Detect ZSTD magic: 0xFD2FB528 (little endian in file: 28 B5 2F FD)
+    if (fsize >= 4 && fbuf[0] == 0x28 && fbuf[1] == 0xB5 && fbuf[2] == 0x2F && fbuf[3] == 0xFD) {
+        unsigned long long const dsize = ZSTD_getFrameContentSize(fbuf, fsize);
+        if (dsize != ZSTD_CONTENTSIZE_ERROR && dsize != ZSTD_CONTENTSIZE_UNKNOWN) {
+            decomp_buf = malloc(dsize);
+            if (decomp_buf) {
+                size_t const rsize = ZSTD_decompress(decomp_buf, dsize, fbuf, fsize);
+                if (!ZSTD_isError(rsize)) {
+                    data = decomp_buf;
+                    data_sz = rsize;
+                } else {
+                    free(decomp_buf); decomp_buf = NULL;
+                }
+            }
+        }
     }
-    struct timespec last_draw; clock_gettime(CLOCK_MONOTONIC, &last_draw);
-    int spinner = 0;
 
-    char *line = NULL; size_t len = 0; ssize_t r;
+    char *p = (char *)data;
+    char *end = (char *)data + data_sz;
     int header_ok = 0; int version = 1;
-    unsigned long long totals_files = 0ULL;
-    unsigned long long count_v1_v2 = 0ULL;
     unsigned long long lines_read = 0ULL;
-    while ((r = getline(&line, &len, f)) != -1) {
+    unsigned long long count_v1_v2 = 0ULL;
+
+    while (p < end) {
         if (g_interrupted) break;
-        if (r > 0 && (line[r-1] == '\n' || line[r-1] == '\r')) line[--r] = '\0';
+        char *line_start = p;
+        while (p < end && *p != '\n' && *p != '\r') p++;
+        size_t line_len = p - line_start;
+        
+        char line_buf[PATH_MAX + 1024];
+        if (line_len >= sizeof(line_buf)) line_len = sizeof(line_buf) - 1;
+        memcpy(line_buf, line_start, line_len);
+        line_buf[line_len] = '\0';
+        while (p < end && (*p == '\n' || *p == '\r')) p++;
+
+        if (line_len == 0) continue;
+
         if (!header_ok) {
-            if (strncmp(line, "# fastdu-cache v3", 18) == 0) { header_ok = 1; version = 3; }
-            else if (strncmp(line, "# fastdu-cache v2", 18) == 0) { header_ok = 1; version = 2; }
-            else if (strncmp(line, "# fastdu-cache v1", 18) == 0) { header_ok = 1; version = 1; }
-            draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
+            if (strncmp(line_buf, "# fastdu-cache v3", 17) == 0) { header_ok = 1; version = 3; }
+            else if (strncmp(line_buf, "# fastdu-cache v2", 17) == 0) { header_ok = 1; version = 2; }
+            else if (strncmp(line_buf, "# fastdu-cache v1", 17) == 0) { header_ok = 1; version = 1; }
             continue;
         }
-        if (strncmp(line, "root\t", 5) == 0) {
-            draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
+
+        if (strncmp(line_buf, "root\t", 5) == 0) continue;
+        if (version >= 3 && strncmp(line_buf, "totals\t", 7) == 0) continue;
+        if (version >= 3 && strncmp(line_buf, "totals_files\t", 13) == 0) {
+            sscanf(line_buf + 13, "%llu", &g_last_files);
             continue;
         }
-        if (version >= 3 && strncmp(line, "totals\t", 8) == 0) {
-            draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
-            continue;
-        }
-        if (version >= 3 && strncmp(line, "totals_files\t", 14) == 0) {
-            const char *b = line + 14;
-            unsigned long long v = 0ULL; sscanf(b, "%llu", &v);
-            totals_files = v;
-            draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
-            continue;
-        }
-        if (line[0] == 'D' && line[1] == '\t') {
+
+        if (line_buf[0] == 'D' && line_buf[1] == '\t') {
             count_v1_v2++;
-            char *p = line + 2;
-            char *rel = p;
-            char *tab1 = strchr(p, '\t');
-            if (!tab1) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
+            char *rel = line_buf + 2;
+            char *tab1 = strchr(rel, '\t');
+            if (!tab1) continue;
             *tab1 = '\0';
             char *size_str = tab1 + 1;
             char *tab2 = strchr(size_str, '\t');
-            if (!tab2) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
+            if (!tab2) continue;
             *tab2 = '\0';
             char *time_str = tab2 + 1;
-            char *ino_str = NULL; char *mtime_str = NULL;
+            char *ino_str = NULL, *mtime_str = NULL;
             if (version >= 2) {
                 char *tab3 = strchr(time_str, '\t');
-                if (!tab3) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
-                *tab3 = '\0';
-                ino_str = tab3 + 1;
-                char *tab4 = strchr(ino_str, '\t');
-                if (!tab4) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
-                *tab4 = '\0';
-                mtime_str = tab4 + 1;
+                if (tab3) {
+                    *tab3 = '\0';
+                    ino_str = tab3 + 1;
+                    char *tab4 = strchr(ino_str, '\t');
+                    if (tab4) { *tab4 = '\0'; mtime_str = tab4 + 1; }
+                }
             }
             char *rel_dec = pct_decode(rel);
-            if (!rel_dec) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
-            char *abs = abspath_from_rel(root, rel_dec);
-            free(rel_dec);
-            if (!abs) { draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw); continue; }
-            unsigned long long size = 0ULL;
-            long last_scan = 0;
-            unsigned long long ino = 0ULL; long dir_mtime = 0;
-            sscanf(size_str, "%llu", &size);
-            sscanf(time_str, "%ld", &last_scan);
-            if (version >= 2) { sscanf(ino_str, "%llu", &ino); sscanf(mtime_str, "%ld", &dir_mtime); }
-            time_t t = (time_t)last_scan;
-            CacheEntry *ce = cache_upsert(c, root, abs, size, t);
-            if (ce) { ce->ino = ino; ce->dir_mtime = (time_t)dir_mtime; }
-            free(abs);
+            if (rel_dec) {
+                char *abs = abspath_from_rel(root, rel_dec);
+                if (abs) {
+                    unsigned long long size = 0ULL, ino = 0ULL;
+                    long last_scan = 0, dir_mtime = 0;
+                    sscanf(size_str, "%llu", &size);
+                    sscanf(time_str, "%ld", &last_scan);
+                    if (ino_str) sscanf(ino_str, "%llu", &ino);
+                    if (mtime_str) sscanf(mtime_str, "%ld", &dir_mtime);
+                    cache_upsert_with_meta(c, root, abs, size, (time_t)last_scan, ino, (time_t)dir_mtime);
+                    free(abs);
+                }
+                free(rel_dec);
+            }
         }
         lines_read++;
-        if ((g_headless && (lines_read % 1000ULL == 0ULL)) || (debug_cache && (lines_read % 1000ULL == 0ULL)))
-            fprintf(stderr, "[cache] read %llu lines\n", (unsigned long long)lines_read);
-        draw_cache_progress(cache_path, f, total_bytes, &spinner, &last_draw);
     }
-    if (g_headless || debug_cache) fprintf(stderr, "[cache] done lines=%llu\n", (unsigned long long)lines_read);
-    // Clear progress line if UI is active
-    if (g_tui_active) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
-    free(line);
-    fclose(f);
+
+    free(fbuf);
+    if (decomp_buf) free(decomp_buf);
     free(cache_path);
-    // set runtime totals from cache if present
-    if (totals_files > 0ULL) g_last_files = totals_files;
-    else if (count_v1_v2 > 0ULL) g_last_files = count_v1_v2; // fallback for older caches
-    return 1; // loaded
+    return 1;
 }
 
 static int cache_load(const char *root, Cache *c) {
