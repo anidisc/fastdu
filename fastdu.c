@@ -3094,7 +3094,27 @@ static void draw_list(const DirView *dv, int top) {
         int w_main = cols * 40 / 100;
         int w_preview = cols - w_parent - w_main;
 
-        draw_column(&g_dv_parent, 0, 0, w_parent, 0);
+        if (g_dv_parent.n > 0) {
+            draw_column(&g_dv_parent, 0, 0, w_parent, 0);
+        } else {
+            // Draw centered ROOT label if we are at scan root
+            int archive_offset = g_inside_archive_path ? 1 : 0;
+            int y_mid = (rows - 3) / 2 + archive_offset;
+            const char *label = "/ROOT";
+            int lx = (w_parent - (int)strlen(label)) / 2;
+            if (lx < 0) lx = 0;
+            attron(COLOR_PAIR(2) | A_BOLD);
+            mvaddstr(y_mid, lx, label);
+            attroff(COLOR_PAIR(2) | A_BOLD);
+            // Draw vertical separator manually
+            attron(COLOR_PAIR(2));
+            int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
+            for (int i = 0; i < list_rows + (g_decorative?2:0); i++) {
+                int vy = (g_inside_archive_path ? 2 : 1) + i;
+                if (vy < rows - 2) mvaddch(vy, w_parent - 1, ACS_VLINE);
+            }
+            attroff(COLOR_PAIR(2));
+        }
         draw_column(dv, top, w_parent, w_main, 1);
         
         // Draw preview
