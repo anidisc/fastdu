@@ -2995,7 +2995,7 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
     // Info column logic
     int info_w_default = 16;
     int info_w = (g_info_col_mode == INFOCOL_HIDDEN || width < 60) ? 0 : info_w_default;
-    int info_col = x + width - info_w;
+    int info_col = x + width - info_w - 1; // -1 for the vertical separator
     if (info_w > 0) name_max = info_col - (name_col + indent + icon_w) - 1;
 
     if (name_max > 0) {
@@ -3287,6 +3287,7 @@ static void show_help(void) {
         "  F - regex search (case-insensitive), enables query filter",
         "  t - toggle type filter (all/dirs/files)",
         "  T - toggle filter by query",
+        "  Ctrl-T - reset all filters and search queries",
         "  SPACE - mark/unmark file/dir",
         "  Ctrl-A - select/deselect all in view",
         "  m - move marked to current directory",
@@ -4705,7 +4706,17 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;
-        else if (ch == 'a' || ch == 'A') {
+        else if (ch == 20) { // Ctrl-T: reset all filters
+            g_filter_mode = FILTER_ALL;
+            g_filter_by_query = 0;
+            g_search_query[0] = '\0';
+            if (g_regex_enabled) { regfree(&g_regex); g_regex_enabled = 0; }
+            view_free(&dv);
+            top = 0;
+            build_dir_view(current, root, &cache, &dv);
+            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+            draw_status("Filters reset to ALL");
+        } else if (ch == 'a' || ch == 'A') {
             if (g_miller_mode) {
                 draw_status("Tree View is not compatible with Miller Columns.");
             } else {
