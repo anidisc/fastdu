@@ -2952,14 +2952,30 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
     int base_pair = ve->is_dir ? 3 : 4;
     attron(COLOR_PAIR(base_pair));
     int icon_w = g_use_nerd_fonts ? 3 : 0;
-    if (g_use_nerd_fonts) mvaddstr(y, name_col, get_icon(ve->name, ve->is_dir));
+    int indent = g_tree_mode ? (ve->depth * 2) : 0;
+
+    // Draw tree branches
+    if (g_tree_mode && indent > 0) {
+        for (int k = 0; k < indent - 2; k++) mvaddch(y, name_col + k, ' ');
+        mvaddstr(y, name_col + indent - 2, "└ ");
+    }
+
+    if (g_use_nerd_fonts) mvaddstr(y, name_col + indent, get_icon(ve->name, ve->is_dir));
     
-    int name_max = x + width - (name_col + icon_w) - 1;
+    if (ve->is_dir) attron(A_BOLD);
+    if (g_tree_mode && ve->is_dir) {
+        mvaddch(y, name_col + indent + icon_w, ve->expanded ? '-' : '+');
+        mvaddch(y, name_col + indent + icon_w + 1, ' ');
+        indent += 2;
+    }
+    
+    int name_max = x + width - (name_col + indent + icon_w) - 1;
     if (name_max > 0) {
         if (g_inside_archive_path && !is_sel) attron(COLOR_PAIR(2));
-        draw_truncated_name(y, name_col + icon_w, ve->name, name_max);
+        draw_truncated_name(y, name_col + indent + icon_w, ve->name, name_max);
         if (g_inside_archive_path && !is_sel) attroff(COLOR_PAIR(2));
     }
+    if (ve->is_dir) attroff(A_BOLD);
     attroff(COLOR_PAIR(base_pair));
     if (is_sel) attroff(A_REVERSE | A_BOLD);
 }
@@ -4634,10 +4650,21 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;
         else if (ch == 'a' || ch == 'A') {
-            g_tree_mode = !g_tree_mode;
-            view_free(&dv);
-            top = 0;
-            build_dir_view(current, root, &cache, &dv);
+            if (g_miller_mode) {
+                draw_status("Tree View is not compatible with Miller Columns.");
+            } else {
+                g_tree_mode = !g_tree_mode;
+                view_free(&dv);
+                top = 0;
+                build_dir_view(current, root, &cache, &dv);
+            }
+        } else if (ch == 'M') {
+            if (g_tree_mode) {
+                draw_status("Miller Columns are not compatible with Tree View.");
+            } else {
+                g_miller_mode = !g_miller_mode;
+                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+            }
         } else if (ch == KEY_MOUSE) {
             MEVENT event;
             if (getmouse(&event) == OK) {
