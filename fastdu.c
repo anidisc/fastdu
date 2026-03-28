@@ -126,6 +126,9 @@ typedef struct {
     unsigned long long view_total;
 } DirView;
 
+static DirView g_dv_parent;
+static DirView g_dv_preview;
+
 static void draw_status(const char *msg);
 static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
@@ -181,6 +184,7 @@ static int g_decorative = 0;    // decorative UI: separators, header bar, extra 
 static int g_one_file_system = 0;
 static int g_show_graph = 1;
 static int g_use_nerd_fonts = 0; // Nerd Fonts icons support
+static int g_miller_mode = 0;    // Miller columns (ranger-style) toggle
 static dev_t g_root_dev = 0;
 
 typedef struct {
@@ -2013,6 +2017,38 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
     return 0;
 }
 
+static void update_miller_columns(const char *current_path, const char *root, Cache *cache, DirView *dv_main) {
+    if (!g_miller_mode) return;
+
+    // 1. Update Parent View (Left)
+    char *parent_path = get_parent(current_path);
+    if (parent_path && strcmp(current_path, root) != 0) {
+        if (!g_dv_parent.path || strcmp(g_dv_parent.path, parent_path) != 0) {
+            view_free(&g_dv_parent);
+            build_dir_view(parent_path, root, cache, &g_dv_parent);
+        }
+        free(parent_path);
+    } else {
+        view_free(&g_dv_parent);
+        if (parent_path) free(parent_path);
+    }
+
+    // 2. Update Preview View (Right)
+    if (dv_main->n > 0) {
+        ViewEntry *ve = &dv_main->v[dv_main->selected];
+        if (ve->is_dir) {
+            if (!g_dv_preview.path || strcmp(g_dv_preview.path, ve->abs_path) != 0) {
+                view_free(&g_dv_preview);
+                build_dir_view(ve->abs_path, root, cache, &g_dv_preview);
+            }
+        } else {
+            view_free(&g_dv_preview);
+        }
+    } else {
+        view_free(&g_dv_preview);
+    }
+}
+
 // Utility: sum sizes for copy estimation (fd-based)
 // Count files recursively (regular files only) using fd-based traversal
 static unsigned long long count_dir_files_fd(int dirfd) {
@@ -2865,6 +2901,89 @@ static void show_duplicates_view(const char *scan_root, Cache *cache, char *cach
     free(vi);
 }
 
+static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_sel, unsigned long long view_total, int sizew) {
+    int size_col = x + 2;
+    int type_col = size_col + (sizew > 0 ? (sizew + 1) : 0);
+    int name_col = type_col + 2;
+    
+    if (is_sel) attron(A_REVERSE | A_BOLD);
+    mvhline(y, x, ' ', width);
+
+    char sizebuf[64] = "";
+    int size_color = 0;
+    if (sizew > 0) {
+        if (g_diff_mode) {
+            unsigned long long abs_delta = (ve->delta < 0) ? (unsigned long long)(-ve->delta) : (unsigned long long)ve->delta;
+            char hbuf[32]; human_size(abs_delta, hbuf, sizeof(hbuf));
+            snprintf(sizebuf, sizeof(sizebuf), "%c%s", (ve->delta >= 0) ? '+' : '-', hbuf);
+        } else if (g_display_mode == DISP_PCT) {
+            if (ve->size_known) {
+                double pct = (double)ve->size * 100.0 / (double)view_total;
+                if (pct > 999.9) pct = 999.9;
+                snprintf(sizebuf, sizeof(sizebuf), "%5.1f%%", pct);
+            } else snprintf(sizebuf, sizeof(sizebuf), "  --.-%%");
+        } else {
+            if (ve->size_known) human_size(ve->size, sizebuf, sizeof(sizebuf)); else snprintf(sizebuf, sizeof(sizebuf), "?");
+        }
+    }
+
+    int pad = sizew - (int)strlen(sizebuf); if (pad < 0) pad = 0;
+    
+    // Mark
+    if (markset_has(&g_marks, ve->abs_path)) mvaddch(y, x, '*');
+    else if (markset_covers(&g_marks, ve->abs_path)) mvaddch(y, x, '+');
+
+    // Size
+    if (sizew > 0) {
+        if (g_diff_mode) {
+            if (ve->delta > 0) size_color = 7; else if (ve->delta < 0) size_color = 5;
+        } else if (ve->size_known) {
+            if (ve->size >= (1ULL<<30)) size_color = 7; else if (ve->size >= (10ULL<<20)) size_color = 6; else size_color = 5;
+        }
+        if (size_color > 0) attron(COLOR_PAIR(size_color));
+        mvaddnstr(y, size_col + pad, sizebuf, sizew - pad);
+        if (size_color > 0) attroff(COLOR_PAIR(size_color));
+    }
+
+    // Type
+    mvaddch(y, type_col, ve->is_dir ? 'D' : 'F');
+
+    // Name
+    int base_pair = ve->is_dir ? 3 : 4;
+    attron(COLOR_PAIR(base_pair));
+    int icon_w = g_use_nerd_fonts ? 3 : 0;
+    if (g_use_nerd_fonts) mvaddstr(y, name_col, get_icon(ve->name, ve->is_dir));
+    
+    int name_max = x + width - (name_col + icon_w) - 1;
+    if (name_max > 0) {
+        if (g_inside_archive_path && !is_sel) attron(COLOR_PAIR(2));
+        draw_truncated_name(y, name_col + icon_w, ve->name, name_max);
+        if (g_inside_archive_path && !is_sel) attroff(COLOR_PAIR(2));
+    }
+    attroff(COLOR_PAIR(base_pair));
+    if (is_sel) attroff(A_REVERSE | A_BOLD);
+}
+
+static void draw_column(const DirView *dv, int top, int x, int width, int is_active) {
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    int archive_offset = g_inside_archive_path ? 1 : 0;
+    int y_start = (g_decorative ? 3 : 1) + archive_offset;
+    int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
+
+    for (int i = 0; i < list_rows; i++) {
+        size_t idx = (size_t)top + (size_t)i;
+        if (idx >= dv->n) break;
+        draw_list_item(&dv->v[idx], y_start + i, x, width, is_active && (idx == dv->selected), dv->view_total, dv->sizew);
+    }
+    // Draw vertical separator
+    attron(COLOR_PAIR(2));
+    for (int i = 0; i < list_rows + (g_decorative?2:0); i++) {
+        int vy = (g_inside_archive_path ? 2 : 1) + i;
+        if (vy < rows - 2) mvaddch(vy, x + width - 1, ACS_VLINE);
+    }
+    attroff(COLOR_PAIR(2));
+}
+
 /*
  * draw_list
  * ---------
@@ -2875,217 +2994,47 @@ static void show_duplicates_view(const char *scan_root, Cache *cache, char *cach
  * - Highlights the selected row with reverse + bold.
  */
 static void draw_list(const DirView *dv, int top) {
-    int cols; int rows; getmaxyx(stdscr, rows, cols);
-    int archive_offset = g_inside_archive_path ? 1 : 0;
-    int y = (g_decorative ? 3 : 1) + archive_offset;
-    int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
-    int sizew = dv->sizew;
-    int mark_col = 0; // mark column at 0
-    int size_col = 2; // mark + space
-    int type_col = size_col + (sizew > 0 ? (sizew + 1) : 0); // if size hidden, no gap
-    int bar_w = g_show_graph ? 12 : 0; // [##########]
-    int bar_col = type_col + 2;
-    int name_col = type_col + (g_show_graph ? (bar_w + 3) : 2);
-    // Right column anchored to right; width depends only on info mode
-    const int info_w_default = 16; // fits date comfortably
-    int info_w = (g_info_col_mode == INFOCOL_HIDDEN) ? 0 : info_w_default;
-    int info_col = cols - info_w - 1; if (info_col < name_col + 4) info_col = name_col + 4;
-
-    // Decorative header bar (column titles)
-    if (g_decorative) {
-        int h_y = 1 + archive_offset;
-        attron(COLOR_PAIR(1));
-        mvhline(h_y, 0, ' ', cols);
-        // Build dynamic titles
-        char size_title[16];
-        if (g_display_mode == DISP_PCT) snprintf(size_title, sizeof(size_title), "Size(%%)");
-        else if (g_diff_mode) snprintf(size_title, sizeof(size_title), "Delta");
-        else snprintf(size_title, sizeof(size_title), "Size");
-        char info_title[24];
-        if (g_info_col_mode == INFOCOL_MTIME) snprintf(info_title, sizeof(info_title), "Info(mtime)");
-        else if (g_info_col_mode == INFOCOL_OWNER_PERM) snprintf(info_title, sizeof(info_title), "Info(perm)");
-        else snprintf(info_title, sizeof(info_title), "Info(hidden)");
-        // Left headings
-        mvaddnstr(h_y, 0, " M ", cols);
-        // Size header aligned to size column width
-        int stlen = (int)strlen(size_title);
-        int spad = (sizew > stlen) ? (sizew - stlen) : 0;
-        for (int k = 0; k < spad; k++) mvaddch(h_y, size_col + k, ' ');
-        mvaddnstr(h_y, size_col + spad, size_title, sizew - spad);
-        // Type header at exact type_col
-        mvaddnstr(h_y, type_col, "T", cols - type_col);
-        // Bar header
-        if (g_show_graph) mvaddnstr(h_y, bar_col, "Graph", bar_w);
-        // Name header begins at name_col
-        int name_width = (info_col - name_col - 2);
-        if (name_width > 0) mvaddnstr(h_y, name_col, "Name", name_width);
-        // Right heading
-        if (info_w > 0) mvaddnstr(h_y, info_col, info_title, info_w);
-        attroff(COLOR_PAIR(1));
-        // Thin horizontal line below headerbar
-        attron(COLOR_PAIR(2));
-        mvhline(h_y + 1, 0, ACS_HLINE, cols);
-        attroff(COLOR_PAIR(2));
-    }
-
-    unsigned long long view_total = dv->view_total;
-
-    for (int i = 0; i < list_rows; i++) {
-        int idx = top + i;
-        int is_sel = ((size_t)idx == dv->selected);
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    if (!g_miller_mode || cols < 60) {
+        // Standard full-width view
+        int archive_offset = g_inside_archive_path ? 1 : 0;
+        int y = (g_decorative ? 3 : 1) + archive_offset;
+        int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
+        int sizew = dv->sizew;
         
-        if ((size_t)idx >= dv->n) {
-            if (is_sel) attron(A_REVERSE | A_BOLD);
-            mvhline(y + i, 0, ' ', cols);
-            if (is_sel) attroff(A_REVERSE | A_BOLD);
-            continue;
-        }
-
-        const ViewEntry *ve = &dv->v[idx];
-        int base_pair = ve->is_dir ? 3 : 4;
-        
-        attron(COLOR_PAIR(base_pair));
-        if (is_sel) attron(A_REVERSE | A_BOLD);
-        
-        mvhline(y + i, 0, ' ', cols);
-        // left size/percent column
-        char sizebuf[64] = "";
-        if (sizew > 0) {
-            if (g_diff_mode) {
-                unsigned long long abs_delta = (ve->delta < 0) ? (unsigned long long)(-ve->delta) : (unsigned long long)ve->delta;
-                char hbuf[32];
-                human_size(abs_delta, hbuf, sizeof(hbuf));
-                snprintf(sizebuf, sizeof(sizebuf), "%c%s", (ve->delta >= 0) ? '+' : '-', hbuf);
-            } else if (g_display_mode == DISP_PCT) {
-                if (ve->size_known) {
-                    double pct = (double)ve->size * 100.0 / (double)view_total;
-                    if (pct > 999.9) pct = 999.9;
-                    snprintf(sizebuf, sizeof(sizebuf), "%5.1f%%", pct);
-                } else {
-                    snprintf(sizebuf, sizeof(sizebuf), "  --.-%%");
-                }
-            } else { // numeric
-                if (ve->size_known) human_size(ve->size, sizebuf, sizeof(sizebuf)); else snprintf(sizebuf, sizeof(sizebuf), "?");
-            }
-        }
-        // right-align size in its column
-        int l = (int)strlen(sizebuf);
-        int pad = sizew - l; if (pad < 0) pad = 0;
-        // mark column: show '*' if explicitly marked, '+' if inherits from a parent
-        char mchar = ' ';
-        if (markset_has(&g_marks, ve->abs_path)) mchar = '*';
-        else if (markset_covers(&g_marks, ve->abs_path)) mchar = '+';
-        mvaddch(y + i, mark_col, mchar);
-        mvaddch(y + i, mark_col + 1, ' ');
-        // size column at x=size_col
-        if (sizew > 0) {
-            if (pad) { for (int k = 0; k < pad; k++) mvaddch(y + i, size_col + k, ' '); }
-            // colorize size according to value
-            int size_color = 5; // default small
-            unsigned long long base_sz = ve->size;
-            if (g_diff_mode) {
-                if (ve->delta > 0) size_color = 7; // red for increase
-                else if (ve->delta < 0) size_color = 5; // green for decrease
-                else size_color = 0; // default for no change
-            } else if (g_display_mode == DISP_PCT && ve->size_known && view_total > 0ULL) {
-                double pctv = (double)ve->size * 100.0 / (double)view_total;
-                if (pctv >= 20.0) size_color = 7; else if (pctv >= 5.0) size_color = 6; else size_color = 5;
-            } else if (ve->size_known) {
-                if (base_sz >= (1ULL<<30)) size_color = 7; // >= 1 GiB
-                else if (base_sz >= (10ULL<<20)) size_color = 6; // >= 10 MiB
-                else size_color = 5;
-            }
-            if (g_decorative || g_diff_mode) {
-                if (size_color > 0) attron(COLOR_PAIR(size_color));
-                mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
-                if (size_color > 0) attroff(COLOR_PAIR(size_color));
-            } else {
-                mvaddnstr(y + i, size_col + pad, sizebuf, sizew - pad);
-            }
-        }
-        // left vertical separator between type and name
+        // Draw column headers if decorative
         if (g_decorative) {
-            attron(COLOR_PAIR(2));
-            if (name_col - 1 >= 0 && name_col - 1 < cols) mvaddch(y + i, name_col - 1, ACS_VLINE);
-            attroff(COLOR_PAIR(2));
-        }
-        // graph bar
-        if (g_show_graph) {
-            char barbuf[16];
-            barbuf[0] = '[';
-            int filled = 0;
-            if (ve->size_known && view_total > 0) {
-                double frac = (double)ve->size / (double)view_total;
-                filled = (int)(frac * 10.0 + 0.5);
-                if (filled > 10) filled = 10;
-            }
-            for (int k = 0; k < 10; k++) barbuf[k+1] = (k < filled) ? '#' : ' ';
-            barbuf[11] = ']';
-            barbuf[12] = '\0';
-            if (g_decorative && !is_sel) attron(COLOR_PAIR(2));
-            mvaddnstr(y + i, bar_col, barbuf, bar_w);
-            if (g_decorative && !is_sel) attroff(COLOR_PAIR(2));
+            int h_y = 1 + archive_offset;
+            attron(COLOR_PAIR(1)); mvhline(h_y, 0, ' ', cols);
+            mvaddstr(h_y, 2, "Size"); mvaddstr(h_y, sizew + 3, "T"); mvaddstr(h_y, sizew + 6, "Name");
+            attroff(COLOR_PAIR(1));
+            attron(COLOR_PAIR(2)); mvhline(h_y + 1, 0, ACS_HLINE, cols); attroff(COLOR_PAIR(2));
         }
 
-        // type
-        mvaddch(y + i, type_col, ve->is_dir ? 'D' : 'F');
-        // space after type only if non-decorative (in decorative mode, we place a vertical line)
-        if (!g_decorative) mvaddch(y + i, type_col + 1, ' ');
-        // tree indentation and name
-        int indent = g_tree_mode ? (ve->depth * 2) : 0;
-        if (g_tree_mode && indent > 0) {
-            // Very simple tree lines
-            for (int k = 0; k < indent - 2; k++) mvaddch(y + i, name_col + k, ' ');
-            mvaddstr(y + i, name_col + indent - 2, "└ ");
+        for (int i = 0; i < list_rows; i++) {
+            size_t idx = (size_t)top + (size_t)i;
+            if (idx >= dv->n) break;
+            draw_list_item(&dv->v[idx], y + i, 0, cols, (idx == dv->selected), dv->view_total, sizew);
         }
+    } else {
+        // Miller Columns (15% / 40% / 45%)
+        int w_parent = cols * 15 / 100;
+        int w_main = cols * 40 / 100;
+        int w_preview = cols - w_parent - w_main;
 
-        const char *icon = get_icon(ve->name, ve->is_dir);
-        int icon_w = g_use_nerd_fonts ? 3 : 0;
-        if (g_use_nerd_fonts) mvaddstr(y + i, name_col + indent, icon);
+        draw_column(&g_dv_parent, 0, 0, w_parent, 0);
+        draw_column(dv, top, w_parent, w_main, 1);
         
-        if (ve->is_dir) attron(A_BOLD);
-        if (g_tree_mode && ve->is_dir) {
-            mvaddch(y + i, name_col + indent + icon_w, ve->expanded ? '-' : '+');
-            mvaddch(y + i, name_col + indent + icon_w + 1, ' ');
-            indent += 2;
+        // Draw preview
+        if (dv->n > 0 && dv->v[dv->selected].is_dir) {
+            draw_column(&g_dv_preview, 0, w_parent + w_main, w_preview, 0);
+        } else if (dv->n > 0) {
+            int archive_offset = g_inside_archive_path ? 1 : 0;
+            int y_start = (g_decorative ? 3 : 1) + archive_offset;
+            attron(COLOR_PAIR(4));
+            mvaddstr(y_start, w_parent + w_main + 2, "[File selected]");
+            attroff(COLOR_PAIR(4));
         }
-
-        int name_max = (g_info_col_mode == INFOCOL_HIDDEN) ? (cols - name_col - indent - icon_w - 1) : (info_col - name_col - indent - icon_w - 1);
-        if (name_max < 0) name_max = 0;
-        if (g_inside_archive_path && !is_sel) attron(COLOR_PAIR(2));
-        draw_truncated_name(y + i, name_col + indent + icon_w, ve->name, name_max);
-        if (g_inside_archive_path && !is_sel) attroff(COLOR_PAIR(2));
-        if (ve->is_dir) attroff(A_BOLD);
-        // left vertical separator between type and name (after drawing type and name)
-        if (g_decorative) {
-            if (!is_sel) attron(COLOR_PAIR(2));
-            if (name_col - 1 >= 0 && name_col - 1 < cols) mvaddch(y + i, name_col - 1, ACS_VLINE);
-            if (!is_sel) attroff(COLOR_PAIR(2));
-        }
-        // draw vertical separator between left and right
-        if (g_decorative && info_w > 0) {
-            if (!is_sel) attron(COLOR_PAIR(2));
-            mvaddch(y + i, info_col - 1, ACS_VLINE);
-            if (!is_sel) attroff(COLOR_PAIR(2));
-        }
-        // right info column content (mtime / owner+perm)
-        if (info_w > 0) {
-            char ibuf[64]; ibuf[0] = '\0';
-            if (g_info_col_mode == INFOCOL_MTIME) {
-                struct tm lt; localtime_r(&ve->mtime, &lt);
-                strftime(ibuf, sizeof(ibuf), "%Y-%m-%d %H:%M", &lt);
-            } else if (g_info_col_mode == INFOCOL_OWNER_PERM) {
-                format_owner_perm(ve->abs_path, ibuf, sizeof(ibuf));
-            }
-            if (ibuf[0] != '\0') {
-                int il = (int)strlen(ibuf);
-                int ipad = info_w - il; if (ipad < 0) ipad = 0;
-                if (ipad) { for (int k = 0; k < ipad; k++) mvaddch(y + i, info_col + k, ' '); }
-                mvaddnstr(y + i, info_col + ipad, ibuf, info_w - ipad);
-            }
-        }
-        if (is_sel) attroff(A_REVERSE | A_BOLD);
-        attroff(COLOR_PAIR(base_pair));
     }
 }
 
@@ -3256,6 +3205,7 @@ static void show_help(void) {
         "Actions:",
         "  v - preview selected text file (scrollable layer)",
         "  a - toggle tree view mode",
+        "  M - toggle Miller Columns mode (ranger-style)",
         "  E - extension distribution view (current directory)",
         "  U - duplicate finder (waste space analyzer)",
         "  O - open selected item with system default (xdg-open)",
@@ -4669,6 +4619,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
     int top = 0;
     build_dir_view(current, root, &cache, &dv);
+    update_miller_columns(current, root, &cache, &dv);
 
     int ch;
     while (1) {
@@ -4742,12 +4693,22 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
             }
         } else if (ch == 'h' || ch == 'H') {
             show_help();
+        } else if (ch == 'M') {
+            g_miller_mode = !g_miller_mode;
+            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
         } else if (ch == KEY_UP || ch == 'k') {
-            if (dv.selected > 0) dv.selected--;
+            if (dv.selected > 0) {
+                dv.selected--;
+                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+            }
             if ((int)dv.selected < top) top = (int)dv.selected;
         } else if (ch == KEY_DOWN || ch == 'j') {
-            if (dv.selected + 1 < dv.n) dv.selected++;
-int rows, cols; getmaxyx(stdscr, rows, cols);
+            if (dv.selected + 1 < dv.n) {
+                dv.selected++;
+                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+            }
+            int rows, cols; getmaxyx(stdscr, rows, cols);
+
 int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
         } else if (ch == 10 || ch == KEY_RIGHT || ch == 'l') { // Enter
@@ -4780,6 +4741,7 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         view_free(&dv);
                         top = 0;
                         build_dir_view(current, root, &cache, &dv);
+                        if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
                     }
                 } else if (is_archive_file(ve->abs_path)) {
                     // Enter archive
@@ -4836,6 +4798,7 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                     free(parent);
                     view_free(&dv);
                     build_dir_view(current, root, &cache, &dv);
+                    if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
                     // Restore selection/top from nav stack
                     NavState st;
                     if (navstack_pop(&nav, &st)) {
