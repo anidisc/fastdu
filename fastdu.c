@@ -136,7 +136,7 @@ static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const
 static void cache_remove_prefix(Cache *c, const char *prefix);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.55.0"
+#define FASTDU_VERSION "0.56.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -182,7 +182,7 @@ static int g_headless = 0;
 static int g_accuracy_mode = 0; // when set, compute disk usage using st_blocks and force deep rescan
 static int g_decorative = 0;    // decorative UI: separators, header bar, extra colors
 static int g_one_file_system = 0;
-static int g_show_graph = 1;
+static int g_show_graph = 0;
 static int g_use_nerd_fonts = 0; // Nerd Fonts icons support
 static int g_miller_mode = 0;    // Miller columns (ranger-style) toggle
 static dev_t g_root_dev = 0;
@@ -2948,6 +2948,27 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
     // Type
     mvaddch(y, type_col, ve->is_dir ? 'D' : 'F');
 
+    // Graph bar (disabled in Miller mode)
+    int bar_w = (g_show_graph && !g_miller_mode) ? 12 : 0;
+    if (bar_w > 0) {
+        char barbuf[16];
+        barbuf[0] = '[';
+        int filled = 0;
+        if (ve->size_known && view_total > 0) {
+            double frac = (double)ve->size / (double)view_total;
+            filled = (int)(frac * 10.0 + 0.5);
+            if (filled > 10) filled = 10;
+        }
+        for (int k = 0; k < 10; k++) barbuf[k+1] = (k < filled) ? '#' : ' ';
+        barbuf[11] = ']';
+        barbuf[12] = '\0';
+        int bar_col = type_col + 2;
+        if (g_decorative && !is_sel) attron(COLOR_PAIR(2));
+        mvaddnstr(y, bar_col, barbuf, bar_w);
+        if (g_decorative && !is_sel) attroff(COLOR_PAIR(2));
+        name_col += bar_w + 1;
+    }
+
     // Name
     int base_pair = ve->is_dir ? 3 : 4;
     attron(COLOR_PAIR(base_pair));
@@ -2970,12 +2991,37 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
     }
     
     int name_max = x + width - (name_col + indent + icon_w) - 1;
+    
+    // Info column logic
+    int info_w_default = 16;
+    int info_w = (g_info_col_mode == INFOCOL_HIDDEN || width < 60) ? 0 : info_w_default;
+    int info_col = x + width - info_w;
+    if (info_w > 0) name_max = info_col - (name_col + indent + icon_w) - 1;
+
     if (name_max > 0) {
         if (g_inside_archive_path && !is_sel) attron(COLOR_PAIR(2));
         draw_truncated_name(y, name_col + indent + icon_w, ve->name, name_max);
         if (g_inside_archive_path && !is_sel) attroff(COLOR_PAIR(2));
     }
     if (ve->is_dir) attroff(A_BOLD);
+
+    // Draw info column content
+    if (info_w > 0) {
+        char ibuf[64]; ibuf[0] = '\0';
+        if (g_info_col_mode == INFOCOL_MTIME) {
+            struct tm lt; localtime_r(&ve->mtime, &lt);
+            strftime(ibuf, sizeof(ibuf), "%Y-%m-%d %H:%M", &lt);
+        } else if (g_info_col_mode == INFOCOL_OWNER_PERM) {
+            format_owner_perm(ve->abs_path, ibuf, sizeof(ibuf));
+        }
+        if (ibuf[0] != '\0') {
+            int il = (int)strlen(ibuf);
+            int ipad = info_w - il; if (ipad < 0) ipad = 0;
+            if (ipad) { for (int k = 0; k < ipad; k++) mvaddch(y, info_col + k, ' '); }
+            mvaddnstr(y, info_col + ipad, ibuf, info_w - ipad);
+        }
+    }
+
     attroff(COLOR_PAIR(base_pair));
     if (is_sel) attroff(A_REVERSE | A_BOLD);
 }
@@ -3023,6 +3069,16 @@ static void draw_list(const DirView *dv, int top) {
             int h_y = 1 + archive_offset;
             attron(COLOR_PAIR(1)); mvhline(h_y, 0, ' ', cols);
             mvaddstr(h_y, 2, "Size"); mvaddstr(h_y, sizew + 3, "T"); mvaddstr(h_y, sizew + 6, "Name");
+            
+            int info_w = (g_info_col_mode == INFOCOL_HIDDEN) ? 0 : 16;
+            if (info_w > 0 && cols > 60) {
+                char info_title[24];
+                if (g_info_col_mode == INFOCOL_MTIME) snprintf(info_title, sizeof(info_title), "Info(mtime)");
+                else if (g_info_col_mode == INFOCOL_OWNER_PERM) snprintf(info_title, sizeof(info_title), "Info(perm)");
+                else snprintf(info_title, sizeof(info_title), "Info(hidden)");
+                mvaddnstr(h_y, cols - info_w, info_title, info_w);
+            }
+            
             attroff(COLOR_PAIR(1));
             attron(COLOR_PAIR(2)); mvhline(h_y + 1, 0, ACS_HLINE, cols); attroff(COLOR_PAIR(2));
         }
@@ -5125,7 +5181,11 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             g_info_col_mode = (g_info_col_mode == INFOCOL_MTIME) ? INFOCOL_OWNER_PERM : (g_info_col_mode == INFOCOL_OWNER_PERM ? INFOCOL_HIDDEN : INFOCOL_MTIME);
             // redraw on next loop
         } else if (ch == '\t' || ch == 9) {
-            g_show_graph = !g_show_graph;
+            if (g_miller_mode) {
+                draw_status("Graph Bar is not available in Miller Columns mode.");
+            } else {
+                g_show_graph = !g_show_graph;
+            }
         } else if (ch == 'I') {
             // cycle left size column display: numeric -> percentage -> off -> numeric
             g_display_mode = (g_display_mode == DISP_NUM) ? DISP_PCT : (g_display_mode == DISP_PCT ? DISP_OFF : DISP_NUM);
