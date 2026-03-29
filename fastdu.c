@@ -4885,7 +4885,29 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                 } else if (g_inside_archive_path) {
                     draw_status("Editing files inside archives not supported");
                 } else {
+                    unsigned long long old_sz = ve->size;
                     launch_external_editor(ve->abs_path);
+                    // refresh size after edit
+                    struct stat st;
+                    if (lstat(ve->abs_path, &st) == 0 && S_ISREG(st.st_mode)) {
+                        unsigned long long new_sz = file_size_bytes(&st);
+                        if (new_sz != old_sz) {
+                            long long delta = (long long)new_sz - (long long)old_sz;
+                            cache_upsert_with_meta(&cache, root, ve->abs_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                            if (delta > 0) cache_add_ancestors_after_delta(&cache, root, ve->abs_path, (unsigned long long)delta);
+                            else cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
+                            if (delta >= 0) g_last_bytes += (unsigned long long)delta;
+                            else {
+                                unsigned long long dec = (unsigned long long)(-delta);
+                                if (g_last_bytes > dec) g_last_bytes -= dec; else g_last_bytes = 0ULL;
+                            }
+                            cache_save(root, &cache);
+                            view_free(&dv);
+                            build_dir_view(current, root, &cache, &dv);
+                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                            draw_status("File updated.");
+                        }
+                    }
                 }
             }
         } else if (ch == 20) { // Ctrl-T: reset all filters
