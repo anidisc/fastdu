@@ -2907,12 +2907,22 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
     int type_col = size_col + (sizew > 0 ? (sizew + 1) : 0);
     int name_col = type_col + 2;
     
-    if (is_sel) attron(A_REVERSE | A_BOLD);
+    int base_pair = ve->is_dir ? 3 : 4;
+    int highlight_pair = 8; // Highlight pair from config
+
+    // Setup row base attributes
+    if (is_sel) attron(COLOR_PAIR(highlight_pair) | A_BOLD);
+    else attron(COLOR_PAIR(base_pair));
+
     mvhline(y, x, ' ', width);
 
-    char sizebuf[64] = "";
-    int size_color = 0;
+    // 1. Mark
+    if (markset_has(&g_marks, ve->abs_path)) mvaddch(y, x, '*');
+    else if (markset_covers(&g_marks, ve->abs_path)) mvaddch(y, x, '+');
+
+    // 2. Size
     if (sizew > 0) {
+        char sizebuf[64] = "";
         if (g_diff_mode) {
             unsigned long long abs_delta = (ve->delta < 0) ? (unsigned long long)(-ve->delta) : (unsigned long long)ve->delta;
             char hbuf[32]; human_size(abs_delta, hbuf, sizeof(hbuf));
@@ -2926,64 +2936,49 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
         } else {
             if (ve->size_known) human_size(ve->size, sizebuf, sizeof(sizebuf)); else snprintf(sizebuf, sizeof(sizebuf), "?");
         }
-    }
+        int pad = sizew - (int)strlen(sizebuf); if (pad < 0) pad = 0;
 
-    int pad = sizew - (int)strlen(sizebuf); if (pad < 0) pad = 0;
-    
-    // Mark
-    if (markset_has(&g_marks, ve->abs_path)) mvaddch(y, x, '*');
-    else if (markset_covers(&g_marks, ve->abs_path)) mvaddch(y, x, '+');
-
-    // Size
-    if (sizew > 0) {
-        if (g_diff_mode) {
-            if (ve->delta > 0) size_color = 7; else if (ve->delta < 0) size_color = 5;
-        } else if (ve->size_known) {
-            if (ve->size >= (1ULL<<30)) size_color = 7; else if (ve->size >= (10ULL<<20)) size_color = 6; else size_color = 5;
+        if (!is_sel) {
+            int sc = 5;
+            if (g_diff_mode) { if (ve->delta > 0) sc = 7; else if (ve->delta < 0) sc = 5; else sc = base_pair; }
+            else if (ve->size_known) { if (ve->size >= (1ULL<<30)) sc = 7; else if (ve->size >= (10ULL<<20)) sc = 6; else sc = 5; }
+            attron(COLOR_PAIR(sc));
+            mvaddnstr(y, size_col + pad, sizebuf, sizew - pad);
+            attroff(COLOR_PAIR(sc));
+            attron(COLOR_PAIR(base_pair));
+        } else {
+            mvaddnstr(y, size_col + pad, sizebuf, sizew - pad);
         }
-        if (size_color > 0) attron(COLOR_PAIR(size_color));
-        mvaddnstr(y, size_col + pad, sizebuf, sizew - pad);
-        if (size_color > 0) attroff(COLOR_PAIR(size_color));
     }
 
-    // Type
+    // 3. Type
     mvaddch(y, type_col, ve->is_dir ? 'D' : 'F');
 
-    // Graph bar (disabled in Miller mode)
+    // 4. Graph bar (only in normal mode, if enabled)
     int bar_w = (g_show_graph && !g_miller_mode) ? 12 : 0;
     if (bar_w > 0) {
-        char barbuf[16];
-        barbuf[0] = '[';
-        int filled = 0;
+        char barbuf[16]; barbuf[0] = '['; int filled = 0;
         if (ve->size_known && view_total > 0) {
             double frac = (double)ve->size / (double)view_total;
-            filled = (int)(frac * 10.0 + 0.5);
-            if (filled > 10) filled = 10;
+            filled = (int)(frac * 10.0 + 0.5); if (filled > 10) filled = 10;
         }
         for (int k = 0; k < 10; k++) barbuf[k+1] = (k < filled) ? '#' : ' ';
-        barbuf[11] = ']';
-        barbuf[12] = '\0';
-        int bar_col = type_col + 2;
-        if (g_decorative && !is_sel) attron(COLOR_PAIR(2));
-        mvaddnstr(y, bar_col, barbuf, bar_w);
-        if (g_decorative && !is_sel) attroff(COLOR_PAIR(2));
+        barbuf[11] = ']'; barbuf[12] = '\0';
+        int bcol = type_col + 2;
+        if (!is_sel) attron(COLOR_PAIR(2));
+        mvaddnstr(y, bcol, barbuf, bar_w);
+        if (!is_sel) { attroff(COLOR_PAIR(2)); attron(COLOR_PAIR(base_pair)); }
         name_col += bar_w + 1;
     }
 
-    // Name
-    int base_pair = ve->is_dir ? 3 : 4;
-    attron(COLOR_PAIR(base_pair));
+    // 5. Name and Tree markers
     int icon_w = g_use_nerd_fonts ? 3 : 0;
     int indent = g_tree_mode ? (ve->depth * 2) : 0;
-
-    // Draw tree branches
     if (g_tree_mode && indent > 0) {
         for (int k = 0; k < indent - 2; k++) mvaddch(y, name_col + k, ' ');
         mvaddstr(y, name_col + indent - 2, "└ ");
     }
-
     if (g_use_nerd_fonts) mvaddstr(y, name_col + indent, get_icon(ve->name, ve->is_dir));
-    
     if (ve->is_dir) attron(A_BOLD);
     if (g_tree_mode && ve->is_dir) {
         mvaddch(y, name_col + indent + icon_w, ve->expanded ? '-' : '+');
@@ -2991,22 +2986,18 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
         indent += 2;
     }
     
-    int name_max = x + width - (name_col + indent + icon_w) - 1;
-    
-    // Info column logic
     int info_w_default = 16;
     int info_w = (g_info_col_mode == INFOCOL_HIDDEN || width < 60) ? 0 : info_w_default;
-    int info_col = x + width - info_w - 1; // -1 for the vertical separator
-    if (info_w > 0) name_max = info_col - (name_col + indent + icon_w) - 1;
+    int info_col = x + width - info_w - 1;
+    int name_max = (info_w > 0) ? (info_col - (name_col + indent + icon_w) - 1) : (x + width - (name_col + indent + icon_w) - 1);
 
     if (name_max > 0) {
         if (g_inside_archive_path && !is_sel) attron(COLOR_PAIR(2));
         draw_truncated_name(y, name_col + indent + icon_w, ve->name, name_max);
-        if (g_inside_archive_path && !is_sel) attroff(COLOR_PAIR(2));
+        if (g_inside_archive_path && !is_sel) { attroff(COLOR_PAIR(2)); attron(COLOR_PAIR(base_pair)); }
     }
-    if (ve->is_dir) attroff(A_BOLD);
 
-    // Draw info column content
+    // 6. Info Column
     if (info_w > 0) {
         char ibuf[64]; ibuf[0] = '\0';
         if (g_info_col_mode == INFOCOL_MTIME) {
@@ -3023,8 +3014,9 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
         }
     }
 
-    attroff(COLOR_PAIR(base_pair));
-    if (is_sel) attroff(A_REVERSE | A_BOLD);
+    if (is_sel) attroff(COLOR_PAIR(highlight_pair) | A_BOLD);
+    else attroff(COLOR_PAIR(base_pair));
+    if (ve->is_dir) attroff(A_BOLD);
 }
 
 static void draw_text_preview_column(const char *path, int y, int x, int width, int height) {
