@@ -4884,6 +4884,8 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                     draw_status("Cannot edit a directory");
                 } else if (g_inside_archive_path) {
                     draw_status("Editing files inside archives not supported");
+                } else if (!is_textual_file(ve->abs_path)) {
+                    draw_status("Cannot edit binary or non-textual files");
                 } else {
                     unsigned long long old_sz = ve->size;
                     launch_external_editor(ve->abs_path);
