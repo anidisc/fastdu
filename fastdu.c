@@ -3281,18 +3281,41 @@ static void draw_status(const char *msg) {
 
 static int prompt_input(char *buf, size_t bufsz, const char *label) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
-    echo(); curs_set(1);
+    curs_set(1);
     mvhline(rows-1, 0, ' ', cols);
     mvaddnstr(rows-1, 0, label, cols-1);
-    int x = (int)strlen(label);
-    move(rows-1, x);
-    int rc = getnstr(buf, (int)bufsz - 1);
-    noecho(); curs_set(0);
-    if (rc == ERR) { buf[0] = '\0'; return 0; }
-    // Trim trailing spaces
-    size_t n = strlen(buf);
-    while (n > 0 && (buf[n-1] == ' ' || buf[n-1] == '\t' || buf[n-1] == '\r')) { buf[--n] = '\0'; }
-    return (int)n;
+    int x_start = (int)strlen(label);
+    
+    size_t pos = 0;
+    buf[0] = '\0';
+    
+    while (pos < bufsz - 1) {
+        move(rows-1, x_start + (int)pos);
+        refresh();
+        int ch = getch();
+        
+        if (ch == 27) { // ESC
+            buf[0] = '\0';
+            curs_set(0);
+            return -1; 
+        } else if (ch == 10 || ch == 13 || ch == KEY_ENTER) { // ENTER
+            break;
+        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) { // BACKSPACE
+            if (pos > 0) {
+                pos--;
+                mvaddch(rows-1, x_start + (int)pos, ' ');
+            }
+        } else if (isprint(ch)) {
+            buf[pos++] = (char)ch;
+            mvaddch(rows-1, x_start + (int)pos - 1, ch);
+        }
+    }
+    buf[pos] = '\0';
+    curs_set(0);
+    
+    // Trim trailing
+    while (pos > 0 && (buf[pos-1] == ' ' || buf[pos-1] == '\t' || buf[pos-1] == '\r')) { buf[--pos] = '\0'; }
+    return (int)pos;
 }
 
 // Background worker to compute marked files count
@@ -5160,12 +5183,12 @@ draw_status("Selected all in view");
             }
         } else if (ch == 'f') {
             char q[256];
-            if (prompt_input(q, sizeof(q), "Find: ") > 0) {
+            int got = prompt_input(q, sizeof(q), "Find: ");
+            if (got > 0) {
                 strncpy(g_search_query, q, sizeof(g_search_query)); g_search_query[sizeof(g_search_query)-1]='\0';
                 if (dv.n > 0) {
                     size_t start = (dv.selected < dv.n) ? dv.selected : 0;
                     int found = -1;
-                    // search forward including next, wrap around
                     for (size_t off = 1; off <= dv.n; off++) {
                         size_t idx = (start + off) % dv.n;
                         if (strcasestr_bool(dv.v[idx].name, g_search_query)) { found = (int)idx; break; }
@@ -5173,51 +5196,33 @@ draw_status("Selected all in view");
                     if (found >= 0) {
                         dv.selected = (size_t)found;
                         int rows, cols; getmaxyx(stdscr, rows, cols);
-int list_rows = rows - 3 - (g_decorative ? 2 : 0);
+                        int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                         if ((int)dv.selected < top) top = (int)dv.selected;
-                    } else {
-                        draw_status("Nothing Found");
-                    }
+                    } else draw_status("Nothing Found");
                 }
+            } else if (got == 0) {
+                g_search_query[0] = '\0';
+                draw_status("Search query cleared");
             }
         } else if (ch == 'F') {
             char q[256];
             int got = prompt_input(q, sizeof(q), "Regex (case-insensitive): ");
-            if (got >= 0) {
-                if (q[0] == '\0') {
-                    // empty input: leave regex disabled, preserve existing query filter state
-                    g_regex_enabled = 0;
-                } else {
-                    // compile regex (case-insensitive, no submatches)
-                    regex_t re;
-                    int rc = regcomp(&re, q, REG_ICASE | REG_NOSUB);
-                    if (rc != 0) {
-                        char errbuf[256];
-                        regerror(rc, &re, errbuf, sizeof(errbuf));
-                        draw_status("Regex invalid");
-                    } else {
-                        if (g_regex_enabled) regfree(&g_regex);
-                        g_regex = re;
-                        g_regex_enabled = 1;
-                        // enable query filter and rebuild view
-                        char *sel_path = (dv.n > 0) ? xstrdup(dv.v[dv.selected].abs_path) : NULL;
-                        g_filter_by_query = 1;
-                        view_free(&dv);
-                        build_dir_view(current, root, &cache, &dv);
-                        if (dv.n == 0) {
-draw_status("No elements match the regex");
-                        } else if (sel_path) {
-                            size_t new_idx = 0; int found = 0;
-                            for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
-                            if (found) dv.selected = new_idx; else dv.selected = 0;
-                        }
-int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_decorative ? 2 : 0);
-                        if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
-                        if ((int)dv.selected < top) top = (int)dv.selected;
-                        if (top < 0) top = 0;
-                        if (sel_path) free(sel_path);
-                    }
+            if (got == 0) {
+                g_regex_enabled = 0;
+                g_filter_by_query = 0;
+                view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                draw_status("Regex filter disabled");
+            } else if (got > 0) {
+                regex_t re;
+                int rc = regcomp(&re, q, REG_ICASE | REG_NOSUB);
+                if (rc != 0) draw_status("Regex invalid");
+                else {
+                    if (g_regex_enabled) regfree(&g_regex);
+                    g_regex = re; g_regex_enabled = 1;
+                    g_filter_by_query = 1;
+                    view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                    if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
                 }
             }
         } else if (ch == 'n') {
