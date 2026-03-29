@@ -186,6 +186,9 @@ static int g_one_file_system = 0;
 static int g_show_graph = 0;
 static int g_use_nerd_fonts = 0; // Nerd Fonts icons support
 static int g_miller_mode = 0;    // Miller columns (ranger-style) toggle
+static int g_preview_focused = 0; // Focus on the preview column
+static int g_preview_scroll_y = 0;
+static int g_preview_scroll_x = 0;
 static dev_t g_root_dev = 0;
 
 typedef struct {
@@ -3034,17 +3037,31 @@ static void draw_text_preview_column(const char *path, int y, int x, int width, 
         return;
     }
 
-    char line[512];
-    int line_count = 0;
+    char line[1024];
+    int current_line = 0;
+    int drawn_lines = 0;
     attron(COLOR_PAIR(4));
-    while (fgets(line, sizeof(line), fp) && line_count < height) {
-        // Clean line from trailing newline
-        size_t l = strlen(line);
-        if (l > 0 && line[l-1] == '\n') line[--l] = '\0';
-        if (l > 0 && line[l-1] == '\r') line[--l] = '\0';
-        
-        mvaddnstr(y + line_count, x, line, width - 1);
-        line_count++;
+    
+    // If focused, draw a distinct indicator or border (optional, but good for UX)
+    if (g_preview_focused) {
+        attron(A_BOLD);
+        mvaddstr(y - 1, x, " [ PREVIEW FOCUS - ESC to exit ] ");
+        attroff(A_BOLD);
+    }
+
+    while (fgets(line, sizeof(line), fp) && drawn_lines < height) {
+        if (current_line >= g_preview_scroll_y) {
+            // Clean line from trailing newline
+            size_t l = strlen(line);
+            while (l > 0 && (line[l-1] == '\n' || line[l-1] == '\r')) line[--l] = '\0';
+            
+            // Handle horizontal scroll
+            if ((int)l > g_preview_scroll_x) {
+                mvaddnstr(y + drawn_lines, x, line + g_preview_scroll_x, width - 1);
+            }
+            drawn_lines++;
+        }
+        current_line++;
     }
     attroff(COLOR_PAIR(4));
     fclose(fp);
@@ -4877,7 +4894,21 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;
-        else if (ch == 5) { // Ctrl-E: edit file
+        else if (ch == 27) { // ESC
+            if (g_preview_focused) {
+                g_preview_focused = 0;
+                draw_status("Preview focus DISABLED");
+            } else {
+                // Potential reset of other UI states if needed
+            }
+        } else if (g_preview_focused) {
+            // Internal preview navigation (scrolling)
+            if (ch == KEY_UP || ch == 'k') { if (g_preview_scroll_y > 0) g_preview_scroll_y--; }
+            else if (ch == KEY_DOWN || ch == 'j') { g_preview_scroll_y++; }
+            else if (ch == KEY_LEFT || ch == 'h') { if (g_preview_scroll_x > 0) g_preview_scroll_x--; }
+            else if (ch == KEY_RIGHT || ch == 'l') { g_preview_scroll_x++; }
+            continue; // Intercept all other keys while focused
+        } else if (ch == 5) { // Ctrl-E: edit file
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
                 if (ve->is_dir) {
@@ -4999,12 +5030,14 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         } else if (ch == KEY_UP || ch == 'k') {
             if (dv.selected > 0) {
                 dv.selected--;
+                g_preview_scroll_y = 0; g_preview_scroll_x = 0;
                 if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
             }
             if ((int)dv.selected < top) top = (int)dv.selected;
         } else if (ch == KEY_DOWN || ch == 'j') {
             if (dv.selected + 1 < dv.n) {
                 dv.selected++;
+                g_preview_scroll_y = 0; g_preview_scroll_x = 0;
                 if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
             }
             int rows, cols; getmaxyx(stdscr, rows, cols);
@@ -5043,6 +5076,11 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         build_dir_view(current, root, &cache, &dv);
                         if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
                     }
+                } else if (g_miller_mode && !ve->is_dir && (ch == KEY_RIGHT || ch == 'l')) {
+                    // Focus preview on file
+                    g_preview_focused = 1;
+                    g_preview_scroll_y = 0; g_preview_scroll_x = 0;
+                    draw_status("Preview focus ENABLED - Use Arrows/hjkl to scroll, ESC to exit");
                 } else if (is_archive_file(ve->abs_path)) {
                     // Enter archive
                     navstack_push(&nav, current, ve->abs_path, dv.selected, top);
