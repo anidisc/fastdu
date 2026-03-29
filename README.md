@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.57.0**
+- **Current version: 0.58.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **External Editor Integration**: Open and edit any text file directly from the TUI (Press `Ctrl+E`).
 - **Ranger-style Navigation**: Multi-column Miller Columns with automatic live previews for text and images (Press `M` to toggle).
 - **Native Image Previews**: High-performance image viewing using the **Kitty Graphics Protocol** (Ghostty, Kitty, WezTerm) or **Chafa** as a fallback. Aspect ratio is always preserved.
 - **Duplicate Finder**: Identify and remove identical files safely. Now with progress bars and ESC-to-cancel support (Press `U`).
@@ -32,6 +33,16 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.58.0 (Editor Integration)
+
+### 📝 External Editor support
+You can now edit files without leaving **fastdu**.
+- **Quick Edit**: Press `Ctrl+E` on any file to open it in your preferred editor.
+- **Customizable**: Set your editor in `config.toml` (e.g., `editor = "nvim"`) or rely on the `$EDITOR` environment variable.
+- **Seamless Transition**: The TUI suspends while you edit and resumes exactly where you left off.
 
 ---
 
@@ -224,6 +235,7 @@ Produces the `./fastdu` binary.
   - `Y`: Toggle Baseline Snapshot (Diff Mode)
   - `v`: Preview selected text file (Toggle wrap: `w`)
   - `O`: Open selected item with system default (`xdg-open`)
+  - `Ctrl+E`: Edit selected file with external editor
 - **Sorting**: `o` toggles sort key (size → name → mtime → delta), `s` toggles order (asc/desc)
 - **Display**:
   - `I`: Cycles size column (numeric → percent → hidden)

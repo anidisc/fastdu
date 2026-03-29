@@ -137,7 +137,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.57.0"
+#define FASTDU_VERSION "0.58.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -191,6 +191,7 @@ static dev_t g_root_dev = 0;
 typedef struct {
     short pairs[9][2]; // [pair_id][fg, bg]
     int keys[256];     // mappatura tasti custom
+    char editor[256];  // external editor command
 } AppConfig;
 
 static AppConfig g_config;
@@ -234,6 +235,7 @@ static void load_default_config(void) {
     g_config.pairs[6][0] = COLOR_YELLOW; g_config.pairs[6][1] = -1;           // size med
     g_config.pairs[7][0] = COLOR_RED;    g_config.pairs[7][1] = -1;           // size large
     g_config.pairs[8][0] = COLOR_YELLOW; g_config.pairs[8][1] = COLOR_BLUE;   // highlight
+    g_config.editor[0] = '\0'; // default empty
 }
 
 static void init_app_colors(void) {
@@ -318,6 +320,10 @@ static void load_config_file(void) {
             }
             
             if (strcmp(key, "theme") == 0) apply_theme(val);
+            else if (strcmp(key, "editor") == 0) {
+                strncpy(g_config.editor, val, sizeof(g_config.editor)-1);
+                g_config.editor[sizeof(g_config.editor)-1] = '\0';
+            }
             else if (strcmp(key, "header_fg") == 0) g_config.pairs[1][0] = parse_color(val);
             else if (strcmp(key, "header_bg") == 0) g_config.pairs[1][1] = parse_color(val);
             else if (strcmp(key, "accent_fg") == 0) g_config.pairs[2][0] = parse_color(val);
@@ -3230,6 +3236,31 @@ static void draw_list(const DirView *dv, int top) {
 static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
 static void cache_add_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, unsigned long long delta);
 
+static void launch_external_editor(const char *path) {
+    char cmd[PATH_MAX + 256];
+    const char *editor = g_config.editor;
+    
+    if (editor[0] == '\0') {
+        editor = getenv("EDITOR");
+    }
+    if (!editor || editor[0] == '\0') {
+        editor = "vim"; // Last resort fallback
+    }
+
+    snprintf(cmd, sizeof(cmd), "%s \"%s\"", editor, path);
+
+    def_prog_mode();
+    endwin();
+    
+    int rc = system(cmd);
+    if (rc == -1) {
+        // system failed to run
+    }
+
+    reset_prog_mode();
+    refresh();
+}
+
 /*
  * maybe_rescan_hovered
  * --------------------
@@ -3420,6 +3451,7 @@ static void show_help(void) {
         "  E - extension distribution view (current directory)",
         "  U - duplicate finder (waste space analyzer)",
         "  O - open selected item with system default (xdg-open)",
+        "  Ctrl-E - edit selected file with external editor",
         "  r - rescan selected dir",
         "  R - rescan current dir (parallel)",
         "  f - find by name (case-insensitive), n/N next/prev",
@@ -4845,7 +4877,18 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;
-        else if (ch == 20) { // Ctrl-T: reset all filters
+        else if (ch == 5) { // Ctrl-E: edit file
+            if (dv.n > 0) {
+                ViewEntry *ve = &dv.v[dv.selected];
+                if (ve->is_dir) {
+                    draw_status("Cannot edit a directory");
+                } else if (g_inside_archive_path) {
+                    draw_status("Editing files inside archives not supported");
+                } else {
+                    launch_external_editor(ve->abs_path);
+                }
+            }
+        } else if (ch == 20) { // Ctrl-T: reset all filters
             g_filter_mode = FILTER_ALL;
             g_filter_by_query = 0;
             g_search_query[0] = '\0';

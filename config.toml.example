@@ -35,6 +35,14 @@ theme = "dracula"
 # size_l_fg = "red"     # Large items (>1 GiB)
 
 # ---------------------------------------------------------
+# EXTERNAL EDITOR
+# ---------------------------------------------------------
+# Specify your preferred editor for Ctrl+E shortcut.
+# If not set, fastdu will use $EDITOR or a system default (vim/nano).
+#
+# editor = "nvim"
+
+# ---------------------------------------------------------
 # PARSER NOTES
 # ---------------------------------------------------------
 # 1. Lines starting with # are comments.
