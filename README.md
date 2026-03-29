@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.55.0**
+- **Current version: 0.57.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Ranger-style Navigation**: Multi-column Miller Columns with automatic live previews for text and images (Press `M` to toggle).
 - **Native Image Previews**: High-performance image viewing using the **Kitty Graphics Protocol** (Ghostty, Kitty, WezTerm) or **Chafa** as a fallback. Aspect ratio is always preserved.
 - **Duplicate Finder**: Identify and remove identical files safely. Now with progress bars and ESC-to-cancel support (Press `U`).
 - **Archive Exploration**: Browse inside `.zip`, `.tar`, `.7z`, `.iso` and more as if they were directories (Press `Enter` to enter, `Backspace` to exit, `ESC` to cancel).
@@ -31,6 +32,17 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.57.0 (Ranger Mode & UI Refinements)
+
+### 📂 Integrated Miller Columns
+A new way to navigate your filesystem inspired by **ranger**.
+- **Automatic Previews**: When a file is selected in Miller mode (Press `M`), its content (text/markdown) or image is automatically displayed in the third column.
+- **Smart Image Handling**: Graphics are automatically cleared when switching between files to avoid overlapping.
+- **Improved Context**: Added a `/ROOT` label in the parent column when at the scan root for better spatial orientation.
+- **Filter Reset**: Quickly return to the default view by pressing `Ctrl+T` to reset all active filters and search queries.
 
 ---
 
@@ -206,16 +218,17 @@ Produces the `./fastdu` binary.
 - **Navigation**: Up/Down or j/k; Enter/Right (l) to enter/expand; Backspace/Left to go up; `b`/`e` to jump to first/last
 - **Views**:
   - `A`: Toggle Tree View mode
+  - `M`: Toggle Miller Columns mode (Ranger-style)
   - `E`: Open Extension Distribution view
   - `K`: Cycle built-in theme presets
   - `Y`: Toggle Baseline Snapshot (Diff Mode)
   - `v`: Preview selected text file (Toggle wrap: `w`)
   - `O`: Open selected item with system default (`xdg-open`)
-- **Sorting**: `o` toggles sort key (size → name → mtime), `s` toggles order (asc/desc)
+- **Sorting**: `o` toggles sort key (size → name → mtime → delta), `s` toggles order (asc/desc)
 - **Display**:
   - `I`: Cycles size column (numeric → percent → hidden)
   - `i`: Cycles info column (mtime → owner+perm → hidden)
-- **Filters**: `t` cycles type filter (all/dirs/files); `T` toggles the query filter
+- **Filters**: `t` cycles type filter (all/dirs/files); `T` toggles the query filter; `Ctrl+T` resets all filters.
 - **Search**: `f` substring (case-insensitive); `F` regex; `n`/`N` next/prev match
 - **Help/Quit**: `h` help; `q` quit
 

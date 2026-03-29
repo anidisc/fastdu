@@ -134,9 +134,10 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
 static void cache_remove_prefix(Cache *c, const char *prefix);
+static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.56.0"
+#define FASTDU_VERSION "0.57.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -3026,6 +3027,90 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
     if (is_sel) attroff(A_REVERSE | A_BOLD);
 }
 
+static void draw_text_preview_column(const char *path, int y, int x, int width, int height) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        attron(COLOR_PAIR(7));
+        mvaddstr(y + height/2, x + (width-12)/2, "Access Denied");
+        attroff(COLOR_PAIR(7));
+        return;
+    }
+
+    char line[512];
+    int line_count = 0;
+    attron(COLOR_PAIR(4));
+    while (fgets(line, sizeof(line), fp) && line_count < height) {
+        // Clean line from trailing newline
+        size_t l = strlen(line);
+        if (l > 0 && line[l-1] == '\n') line[--l] = '\0';
+        if (l > 0 && line[l-1] == '\r') line[--l] = '\0';
+        
+        mvaddnstr(y + line_count, x, line, width - 1);
+        line_count++;
+    }
+    attroff(COLOR_PAIR(4));
+    fclose(fp);
+}
+
+static void draw_image_preview_column(const char *path, int y, int x, int width, int height) {
+    // Note: This only works effectively with Kitty Graphics Protocol (Ghostty/Kitty)
+    // and doesn't use Chafa fallback here to avoid terminal corruption during list drawing.
+    if (!(getenv("KITTY_WINDOW_ID") || getenv("GHOSTTY_BIN_DIR") || (getenv("TERM") && strstr(getenv("TERM"), "kitty")))) {
+        mvaddstr(y + height/2, x + (width-20)/2, "No Native Graphics");
+        return;
+    }
+
+    FILE *fimg = fopen(path, "rb");
+    if (!fimg) return;
+    fseek(fimg, 0, SEEK_END);
+    long fsize = ftell(fimg);
+    fseek(fimg, 0, SEEK_SET);
+    unsigned char *buf = malloc(fsize);
+    if (buf && fread(buf, 1, fsize, fimg) == (size_t)fsize) {
+        size_t b64_len;
+        char *b64 = base64_encode(buf, fsize, &b64_len);
+        if (b64) {
+            int img_pw = 0, img_ph = 0;
+            int final_c = width - 2, final_r = height - 2;
+            if (get_image_dims(path, &img_pw, &img_ph)) {
+                struct winsize ws;
+                if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_xpixel > 0) {
+                    double cell_w = (double)ws.ws_xpixel / (double)ws.ws_col;
+                    double cell_h = (double)ws.ws_ypixel / (double)ws.ws_row;
+                    double img_ratio = (double)img_pw / (double)img_ph;
+                    double target_ratio = ((double)final_c * cell_w) / ((double)final_r * cell_h);
+                    if (img_ratio > target_ratio) final_r = (int)(((double)final_c * cell_w) / (img_ratio * cell_h));
+                    else final_c = (int)(((double)final_r * cell_h * img_ratio) / cell_w);
+                }
+            }
+            
+            int start_x = x + (width - final_c) / 2;
+            int start_y = y + (height - final_r) / 2;
+            
+            // Delete previous image in this area (simplified for now)
+            printf("\033_Ga=d,d=a\033\\");
+            
+            const size_t chunk_size = 4096;
+            size_t sent = 0;
+            printf("\033[%d;%dH", start_y, start_x);
+            while (sent < b64_len) {
+                size_t to_send = b64_len - sent;
+                if (to_send > chunk_size) to_send = chunk_size;
+                int is_last = (sent + to_send >= b64_len);
+                if (sent == 0) printf("\033_Gq=1,a=T,t=d,f=100,c=%d,r=%d,m=%d;", final_c, final_r, is_last ? 0 : 1);
+                else printf("\033_Gm=%d;", is_last ? 0 : 1);
+                fwrite(b64 + sent, 1, to_send, stdout);
+                printf("\033\\");
+                sent += to_send;
+            }
+            fflush(stdout);
+            free(b64);
+        }
+        free(buf);
+    }
+    fclose(fimg);
+}
+
 static void draw_column(const DirView *dv, int top, int x, int width, int is_active) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
     int archive_offset = g_inside_archive_path ? 1 : 0;
@@ -3118,14 +3203,33 @@ static void draw_list(const DirView *dv, int top) {
         draw_column(dv, top, w_parent, w_main, 1);
         
         // Draw preview
-        if (dv->n > 0 && dv->v[dv->selected].is_dir) {
-            draw_column(&g_dv_preview, 0, w_parent + w_main, w_preview, 0);
-        } else if (dv->n > 0) {
+        if (dv->n > 0) {
+            ViewEntry *ve = &dv->v[dv->selected];
             int archive_offset = g_inside_archive_path ? 1 : 0;
             int y_start = (g_decorative ? 3 : 1) + archive_offset;
-            attron(COLOR_PAIR(4));
-            mvaddstr(y_start, w_parent + w_main + 2, "[File selected]");
-            attroff(COLOR_PAIR(4));
+            int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
+
+            if (ve->is_dir) {
+                // Clear any leftover native images before drawing directory list
+                printf("\033_Ga=d,d=a\033\\"); fflush(stdout);
+                draw_column(&g_dv_preview, 0, w_parent + w_main, w_preview, 0);
+            } else {
+                if (is_image_file(ve->abs_path)) {
+                    draw_image_preview_column(ve->abs_path, y_start, w_parent + w_main + 1, w_preview - 1, list_rows);
+                } else {
+                    // Always clear native images before drawing text or error messages
+                    printf("\033_Ga=d,d=a\033\\"); fflush(stdout);
+                    if (is_textual_file(ve->abs_path)) {
+                        draw_text_preview_column(ve->abs_path, y_start, w_parent + w_main + 1, w_preview - 1, list_rows);
+                    } else {
+                        attron(COLOR_PAIR(6));
+                        int msg_x = w_parent + w_main + (w_preview - 18) / 2;
+                        if (msg_x < w_parent + w_main + 1) msg_x = w_parent + w_main + 1;
+                        mvaddstr(y_start + list_rows/2, msg_x, "Unsupported format");
+                        attroff(COLOR_PAIR(6));
+                    }
+                }
+            }
         }
     }
 }
