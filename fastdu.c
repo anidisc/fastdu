@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.60.0"
+#define FASTDU_VERSION "0.60.2"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -2255,39 +2255,45 @@ typedef struct {
 static int archive_extract_to(const char *archive_path, const char *target_dir, const char *root, Cache *cache) {
     struct stat st_arc;
     unsigned long long total_compressed_bytes = 0;
-    if (stat(archive_path, &st_arc) == 0) total_compressed_bytes = (unsigned long long)st_arc.st_size;
+    int arc_fd = open(archive_path, O_RDONLY);
+    if (arc_fd < 0) return -1;
+    if (fstat(arc_fd, &st_arc) == 0) total_compressed_bytes = (unsigned long long)st_arc.st_size;
 
     struct archive *a = archive_read_new();
     archive_read_support_filter_all(a);
     archive_read_support_format_all(a);
-    if (archive_read_open_filename(a, archive_path, 10240) != ARCHIVE_OK) {
-        archive_read_free(a); return -1;
+    
+    // Open using the file descriptor to track progress via lseek
+    if (archive_read_open_fd(a, arc_fd, 10240) != ARCHIVE_OK) {
+        archive_read_free(a); close(arc_fd); return -1;
     }
 
     struct archive_entry *entry;
-    char global_action = 0; // 'O', 'R', 'S'
+    char global_action = 0;
     int flags = ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM | ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS;
-
     struct timespec last_draw = {0, 0};
 
+    nodelay(stdscr, TRUE); // Catch ESC
+    int final_rc = 0;
+
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-        if (g_interrupted) break;
+        if (g_interrupted || getch() == 27) { final_rc = -1; break; }
+        
         const char *entry_rel = archive_entry_pathname(entry);
         char *full_dest = path_join(target_dir, entry_rel);
         if (!full_dest) continue;
 
-        // Visual feedback with progress bar
         struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
         long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
         if (ms >= 33) {
             last_draw = now;
             int cols, rows; getmaxyx(stdscr, rows, cols);
-            long long read_bytes = archive_filter_bytes(a, -1);
-            double frac = (total_compressed_bytes > 0) ? (double)read_bytes / (double)total_compressed_bytes : 0.0;
+            // Use lseek to get real progress in the compressed file
+            off_t current_pos = lseek(arc_fd, 0, SEEK_CUR);
+            double frac = (total_compressed_bytes > 0) ? (double)current_pos / (double)total_compressed_bytes : 0.0;
             if (frac > 1.0) frac = 1.0;
             int barlen = cols > 40 ? cols - 40 : 20;
-            char bar[256];
-            int filled = (int)(frac * barlen);
+            char bar[256]; int filled = (int)(frac * barlen);
             for (int i=0; i<barlen; i++) bar[i] = (i < filled) ? '#' : '.';
             bar[barlen] = '\0';
             mvhline(rows-1, 0, ' ', cols);
@@ -2297,37 +2303,32 @@ static int archive_extract_to(const char *archive_path, const char *target_dir, 
 
         int skip = 0;
         char *final_dest = xstrdup(full_dest);
-
-        // Conflict check for files
         struct stat st;
         if (lstat(full_dest, &st) == 0) {
+            nodelay(stdscr, FALSE); // Block for conflict prompt
             char action = global_action;
             if (action == 0) {
                 action = prompt_conflict_action(full_dest);
                 if (action == 'O' || action == 'R' || action == 'S') global_action = action;
             }
-
             if (action == 's' || action == 'S') skip = 1;
             else if (action == 'r' || action == 'R') {
                 char *new_p = gen_nonconflicting_path(full_dest);
                 free(final_dest); final_dest = new_p;
             }
-            // 'o' or 'O' -> overwrite (default behavior of archive_write_disk)
+            nodelay(stdscr, TRUE);
         }
 
         if (!skip && final_dest) {
             archive_entry_set_pathname(entry, final_dest);
-            int r = archive_read_extract(a, entry, flags);
-            if (r == ARCHIVE_OK) {
-                // Update cache and global totals
+            if (archive_read_extract(a, entry, flags) == ARCHIVE_OK) {
                 struct stat stnew;
                 if (lstat(final_dest, &stnew) == 0) {
                     if (S_ISREG(stnew.st_mode)) {
                         unsigned long long sz = file_size_bytes(&stnew);
                         cache_upsert_with_meta(cache, root, final_dest, sz, time(NULL), (unsigned long long)stnew.st_ino, stnew.st_mtime);
                         cache_add_ancestors_after_delta(cache, root, final_dest, sz);
-                        g_last_bytes += sz;
-                        g_last_files += 1;
+                        g_last_bytes += sz; g_last_files += 1;
                     } else if (S_ISDIR(stnew.st_mode)) {
                         cache_upsert_with_meta(cache, root, final_dest, 0, time(NULL), (unsigned long long)stnew.st_ino, stnew.st_mtime);
                     }
@@ -2337,10 +2338,12 @@ static int archive_extract_to(const char *archive_path, const char *target_dir, 
         free(full_dest); free(final_dest);
     }
 
+    nodelay(stdscr, FALSE);
     archive_read_close(a);
     archive_read_free(a);
+    close(arc_fd);
     cache_save(root, cache);
-    return 0;
+    return final_rc;
 }
 
 static int zip_compress_items(char **src_paths, size_t num_src, const char *dest_zip, const char *root) {
@@ -2367,9 +2370,10 @@ static int zip_compress_items(char **src_paths, size_t num_src, const char *dest
     unsigned long long processed_bytes = 0ULL;
     struct timespec last_draw = {0, 0};
 
+    nodelay(stdscr, TRUE); // Catch ESC
     int final_rc = 0;
     for (size_t i = 0; i < n; i++) {
-        if (g_interrupted) { final_rc = -1; break; }
+        if (g_interrupted || getch() == 27) { final_rc = -1; break; }
         
         struct stat st;
         if (lstat(list[i].abs, &st) != 0) continue;
@@ -2414,11 +2418,10 @@ static int zip_compress_items(char **src_paths, size_t num_src, const char *dest
                     char buf[16384];
                     ssize_t r;
                     while ((r = read(fd, buf, sizeof(buf))) > 0) {
-                        if (g_interrupted) break;
+                        if (g_interrupted || getch() == 27) { final_rc = -1; break; }
                         archive_write_data(a, buf, (size_t)r);
                         processed_bytes += (unsigned long long)r;
                         
-                        // Visual feedback with progress bar (inner loop for files)
                         struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
                         long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
                         if (ms >= 33) {
@@ -2427,8 +2430,7 @@ static int zip_compress_items(char **src_paths, size_t num_src, const char *dest
                             double frac = (total_uncompressed_bytes > 0) ? (double)processed_bytes / (double)total_uncompressed_bytes : 0.0;
                             if (frac > 1.0) frac = 1.0;
                             int barlen = cols > 40 ? cols - 40 : 20;
-                            char bar[256];
-                            int filled = (int)(frac * barlen);
+                            char bar[256]; int filled = (int)(frac * barlen);
                             for (int b=0; b<barlen; b++) bar[b] = (b < filled) ? '#' : '.';
                             bar[barlen] = '\0';
                             mvhline(rows-1, 0, ' ', cols);
@@ -2443,25 +2445,9 @@ static int zip_compress_items(char **src_paths, size_t num_src, const char *dest
         } else {
             archive_entry_free(entry);
         }
-        
-        // Final update for the item (if it was a directory or empty file)
-        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-        long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
-        if (ms >= 33) {
-            last_draw = now;
-            int cols, rows; getmaxyx(stdscr, rows, cols);
-            double frac = (total_uncompressed_bytes > 0) ? (double)processed_bytes / (double)total_uncompressed_bytes : 0.0;
-            if (frac > 1.0) frac = 1.0;
-            int barlen = cols > 40 ? cols - 40 : 20;
-            char bar[256];
-            int filled = (int)(frac * barlen);
-            for (int b=0; b<barlen; b++) bar[b] = (b < filled) ? '#' : '.';
-            bar[barlen] = '\0';
-            mvhline(rows-1, 0, ' ', cols);
-            mvprintw(rows-1, 0, " Compressing: [%s] %3d%% - %s", bar, (int)(frac * 100), list[i].rel);
-            refresh();
-        }
+        if (final_rc != 0) break;
     }
+    nodelay(stdscr, FALSE);
 
     for (size_t i = 0; i < n; i++) {
         free(list[i].abs);
