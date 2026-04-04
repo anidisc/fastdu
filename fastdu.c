@@ -133,11 +133,12 @@ static void draw_status(const char *msg);
 static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
+static void cache_add_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, unsigned long long delta);
 static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.59.0"
+#define FASTDU_VERSION "0.60.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -2251,7 +2252,101 @@ typedef struct {
     char *rel;
 } ZipTask;
 
+static int archive_extract_to(const char *archive_path, const char *target_dir, const char *root, Cache *cache) {
+    struct stat st_arc;
+    unsigned long long total_compressed_bytes = 0;
+    if (stat(archive_path, &st_arc) == 0) total_compressed_bytes = (unsigned long long)st_arc.st_size;
+
+    struct archive *a = archive_read_new();
+    archive_read_support_filter_all(a);
+    archive_read_support_format_all(a);
+    if (archive_read_open_filename(a, archive_path, 10240) != ARCHIVE_OK) {
+        archive_read_free(a); return -1;
+    }
+
+    struct archive_entry *entry;
+    char global_action = 0; // 'O', 'R', 'S'
+    int flags = ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM | ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS;
+
+    struct timespec last_draw = {0, 0};
+
+    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        if (g_interrupted) break;
+        const char *entry_rel = archive_entry_pathname(entry);
+        char *full_dest = path_join(target_dir, entry_rel);
+        if (!full_dest) continue;
+
+        // Visual feedback with progress bar
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+        long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
+        if (ms >= 33) {
+            last_draw = now;
+            int cols, rows; getmaxyx(stdscr, rows, cols);
+            long long read_bytes = archive_filter_bytes(a, -1);
+            double frac = (total_compressed_bytes > 0) ? (double)read_bytes / (double)total_compressed_bytes : 0.0;
+            if (frac > 1.0) frac = 1.0;
+            int barlen = cols > 40 ? cols - 40 : 20;
+            char bar[256];
+            int filled = (int)(frac * barlen);
+            for (int i=0; i<barlen; i++) bar[i] = (i < filled) ? '#' : '.';
+            bar[barlen] = '\0';
+            mvhline(rows-1, 0, ' ', cols);
+            mvprintw(rows-1, 0, " Extracting: [%s] %3d%% - %s", bar, (int)(frac * 100), entry_rel);
+            refresh();
+        }
+
+        int skip = 0;
+        char *final_dest = xstrdup(full_dest);
+
+        // Conflict check for files
+        struct stat st;
+        if (lstat(full_dest, &st) == 0) {
+            char action = global_action;
+            if (action == 0) {
+                action = prompt_conflict_action(full_dest);
+                if (action == 'O' || action == 'R' || action == 'S') global_action = action;
+            }
+
+            if (action == 's' || action == 'S') skip = 1;
+            else if (action == 'r' || action == 'R') {
+                char *new_p = gen_nonconflicting_path(full_dest);
+                free(final_dest); final_dest = new_p;
+            }
+            // 'o' or 'O' -> overwrite (default behavior of archive_write_disk)
+        }
+
+        if (!skip && final_dest) {
+            archive_entry_set_pathname(entry, final_dest);
+            int r = archive_read_extract(a, entry, flags);
+            if (r == ARCHIVE_OK) {
+                // Update cache and global totals
+                struct stat stnew;
+                if (lstat(final_dest, &stnew) == 0) {
+                    if (S_ISREG(stnew.st_mode)) {
+                        unsigned long long sz = file_size_bytes(&stnew);
+                        cache_upsert_with_meta(cache, root, final_dest, sz, time(NULL), (unsigned long long)stnew.st_ino, stnew.st_mtime);
+                        cache_add_ancestors_after_delta(cache, root, final_dest, sz);
+                        g_last_bytes += sz;
+                        g_last_files += 1;
+                    } else if (S_ISDIR(stnew.st_mode)) {
+                        cache_upsert_with_meta(cache, root, final_dest, 0, time(NULL), (unsigned long long)stnew.st_ino, stnew.st_mtime);
+                    }
+                }
+            }
+        }
+        free(full_dest); free(final_dest);
+    }
+
+    archive_read_close(a);
+    archive_read_free(a);
+    cache_save(root, cache);
+    return 0;
+}
+
 static int zip_compress_items(char **src_paths, size_t num_src, const char *dest_zip, const char *root) {
+    unsigned long long total_uncompressed_bytes = 0ULL;
+    for (size_t i = 0; i < num_src; i++) total_uncompressed_bytes += sum_path_size(src_paths[i]);
+
     struct archive *a = archive_write_new();
     archive_write_set_format_zip(a);
     if (archive_write_open_filename(a, dest_zip) != ARCHIVE_OK) {
@@ -2268,6 +2363,9 @@ static int zip_compress_items(char **src_paths, size_t num_src, const char *dest
         const char *base = path_basename_const(src_paths[i]);
         list[n++] = (ZipTask){xstrdup(src_paths[i]), xstrdup(base)};
     }
+
+    unsigned long long processed_bytes = 0ULL;
+    struct timespec last_draw = {0, 0};
 
     int final_rc = 0;
     for (size_t i = 0; i < n; i++) {
@@ -2318,6 +2416,25 @@ static int zip_compress_items(char **src_paths, size_t num_src, const char *dest
                     while ((r = read(fd, buf, sizeof(buf))) > 0) {
                         if (g_interrupted) break;
                         archive_write_data(a, buf, (size_t)r);
+                        processed_bytes += (unsigned long long)r;
+                        
+                        // Visual feedback with progress bar (inner loop for files)
+                        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                        long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
+                        if (ms >= 33) {
+                            last_draw = now;
+                            int cols, rows; getmaxyx(stdscr, rows, cols);
+                            double frac = (total_uncompressed_bytes > 0) ? (double)processed_bytes / (double)total_uncompressed_bytes : 0.0;
+                            if (frac > 1.0) frac = 1.0;
+                            int barlen = cols > 40 ? cols - 40 : 20;
+                            char bar[256];
+                            int filled = (int)(frac * barlen);
+                            for (int b=0; b<barlen; b++) bar[b] = (b < filled) ? '#' : '.';
+                            bar[barlen] = '\0';
+                            mvhline(rows-1, 0, ' ', cols);
+                            mvprintw(rows-1, 0, " Compressing: [%s] %3d%% - %s", bar, (int)(frac * 100), list[i].rel);
+                            refresh();
+                        }
                     }
                     close(fd);
                 }
@@ -2327,11 +2444,22 @@ static int zip_compress_items(char **src_paths, size_t num_src, const char *dest
             archive_entry_free(entry);
         }
         
-        // Visual feedback (simple)
-        if (i % 10 == 0) {
-            char msg[PATH_MAX + 64];
-            snprintf(msg, sizeof(msg), "Compressing: %s", list[i].rel);
-            draw_status(msg); refresh();
+        // Final update for the item (if it was a directory or empty file)
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+        long ms = (now.tv_sec - last_draw.tv_sec) * 1000 + (now.tv_nsec - last_draw.tv_nsec) / 1000000;
+        if (ms >= 33) {
+            last_draw = now;
+            int cols, rows; getmaxyx(stdscr, rows, cols);
+            double frac = (total_uncompressed_bytes > 0) ? (double)processed_bytes / (double)total_uncompressed_bytes : 0.0;
+            if (frac > 1.0) frac = 1.0;
+            int barlen = cols > 40 ? cols - 40 : 20;
+            char bar[256];
+            int filled = (int)(frac * barlen);
+            for (int b=0; b<barlen; b++) bar[b] = (b < filled) ? '#' : '.';
+            bar[barlen] = '\0';
+            mvhline(rows-1, 0, ' ', cols);
+            mvprintw(rows-1, 0, " Compressing: [%s] %3d%% - %s", bar, (int)(frac * 100), list[i].rel);
+            refresh();
         }
     }
 
@@ -3348,10 +3476,6 @@ static void draw_list(const DirView *dv, int top) {
     }
 }
 
-/* Forward declarations for cache ancestor adjustment helpers used below */
-static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
-static void cache_add_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, unsigned long long delta);
-
 static void launch_external_editor(const char *path) {
     char cmd[PATH_MAX + 256];
     const char *editor = g_config.editor;
@@ -3573,6 +3697,7 @@ static void show_help(void) {
         "  O - open selected item with system default (xdg-open)",
         "  Ctrl-E - edit selected file with external editor",
         "  z - compress marked/selected items to .zip",
+        "  x - extract selected archive",
         "  r - rescan selected dir",
         "  R - rescan current dir (parallel)",
         "  f - find by name (case-insensitive), n/N next/prev",
@@ -5045,6 +5170,66 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                             draw_status("File updated.");
                         }
                     }
+                }
+            }
+        } else if (ch == 'x' || ch == 'X') { // Extract archive
+            if (dv.n > 0) {
+                ViewEntry *ve = &dv.v[dv.selected];
+                if (!ve->is_dir && is_archive_file(ve->abs_path)) {
+                    // Suggest a directory name (strip extension)
+                    char name_buf[256];
+                    const char *base = path_basename_const(ve->abs_path);
+                    strncpy(name_buf, base, sizeof(name_buf) - 1);
+                    name_buf[sizeof(name_buf)-1] = '\0';
+                    char *dot = strrchr(name_buf, '.');
+                    if (dot && dot != name_buf) *dot = '\0';
+                    // Special case for .tar.gz etc
+                    dot = strrchr(name_buf, '.');
+                    if (dot && (strcasecmp(dot, ".tar") == 0)) *dot = '\0';
+
+                    char prompt[128];
+                    snprintf(prompt, sizeof(prompt), "Extract to (blank for cwd): ");
+                    int got = prompt_input(name_buf, sizeof(name_buf), prompt);
+                    if (got >= 0) {
+                        char *target_dir = NULL;
+                        if (got == 0) target_dir = xstrdup(current);
+                        else target_dir = path_join(current, name_buf);
+
+                        if (target_dir) {
+                            // Ensure target exists
+                            if (got > 0 && !path_exists(target_dir)) {
+                                mkdir(target_dir, 0777);
+                            }
+                            
+                            draw_status("Extracting archive..."); refresh();
+                            if (archive_extract_to(ve->abs_path, target_dir, root, &cache) == 0) {
+                                draw_status("Extraction complete.");
+                            } else {
+                                draw_status("Extraction failed.");
+                            }
+                            
+                            // Rebuild view and find the new item index
+                            view_free(&dv);
+                            build_dir_view(current, root, &cache, &dv);
+                            size_t new_idx = 0; int found = 0;
+                            for (size_t i = 0; i < dv.n; i++) {
+                                if (strcmp(dv.v[i].abs_path, target_dir) == 0) {
+                                    new_idx = i; found = 1; break;
+                                }
+                            }
+                            if (found) {
+                                dv.selected = new_idx;
+                                int rows, cols; getmaxyx(stdscr, rows, cols);
+                                int list_rows = rows - 3 - (g_decorative ? 2 : 0);
+                                if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                                if ((int)dv.selected < top) top = (int)dv.selected;
+                            }
+                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                            free(target_dir);
+                        }
+                    }
+                } else {
+                    draw_status("Selected item is not a supported archive.");
                 }
             }
         } else if (ch == 'z' || ch == 'Z') { // Zip compression
