@@ -3425,8 +3425,11 @@ static int prompt_input(char *buf, size_t bufsz, const char *label) {
     mvaddnstr(rows-1, 0, label, cols-1);
     int x_start = (int)strlen(label);
     
-    size_t pos = 0;
-    buf[0] = '\0';
+    // Use existing buffer content as default
+    size_t pos = strlen(buf);
+    if (pos >= bufsz) pos = bufsz - 1;
+    buf[pos] = '\0';
+    mvaddstr(rows-1, x_start, buf);
     
     while (pos < bufsz - 1) {
         move(rows-1, x_start + (int)pos);
@@ -3453,8 +3456,9 @@ static int prompt_input(char *buf, size_t bufsz, const char *label) {
     curs_set(0);
     
     // Trim trailing
-    while (pos > 0 && (buf[pos-1] == ' ' || buf[pos-1] == '\t' || buf[pos-1] == '\r')) { buf[--pos] = '\0'; }
-    return (int)pos;
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n-1] == ' ' || buf[n-1] == '\t' || buf[n-1] == '\r')) { buf[--n] = '\0'; }
+    return (int)n;
 }
 
 // Background worker to compute marked files count
@@ -3568,7 +3572,7 @@ static void show_help(void) {
         "  U - duplicate finder (waste space analyzer)",
         "  O - open selected item with system default (xdg-open)",
         "  Ctrl-E - edit selected file with external editor",
-        "  Ctrl-Z - compress marked/selected items to .zip",
+        "  z - compress marked/selected items to .zip",
         "  r - rescan selected dir",
         "  R - rescan current dir (parallel)",
         "  f - find by name (case-insensitive), n/N next/prev",
@@ -4831,7 +4835,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         // TUI setup early to show progress
         load_config_file();
         initscr();
-        raw(); // Disable line buffering and control keys (Ctrl+Z, Ctrl+C reach getch)
+        cbreak(); // Standard input mode
         noecho();
         keypad(stdscr, TRUE);
         mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
@@ -4993,7 +4997,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         refresh();
 
         ch = getch();
-        if (ch == 'q' || ch == 'Q' || ch == 3) break; // q or Ctrl-C to quit
+        if (ch == 'q' || ch == 'Q') break;
         else if (ch == 27) { // ESC
             if (g_preview_focused) {
                 g_preview_focused = 0;
@@ -5043,7 +5047,7 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                     }
                 }
             }
-        } else if (ch == 26) { // Ctrl-Z: Zip compression
+        } else if (ch == 'z' || ch == 'Z') { // Zip compression
             if (dv.n > 0) {
                 // Determine source items
                 char **src_paths = NULL;
@@ -5058,27 +5062,24 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                     src_paths[0] = xstrdup(dv.v[dv.selected].abs_path);
                 }
 
-                // Default name: if one item, use its name. If many, "archive.zip"
-                char default_name[PATH_MAX];
+                // Suggest default name
+                char name_buf[256];
                 if (num_src == 1) {
                     const char *base = path_basename_const(src_paths[0]);
-                    snprintf(default_name, sizeof(default_name), "%s", base);
+                    strncpy(name_buf, base, sizeof(name_buf) - 5);
+                    name_buf[sizeof(name_buf) - 5] = '\0';
                 } else {
-                    strncpy(default_name, "archive", sizeof(default_name));
+                    strncpy(name_buf, "archive", sizeof(name_buf) - 5);
                 }
+                strcat(name_buf, ".zip"); // Add extension by default
 
-                char name_buf[256];
                 char prompt[128];
-                snprintf(prompt, sizeof(prompt), "Zip name (.zip): ");
+                snprintf(prompt, sizeof(prompt), "Zip name: ");
+                
+                // Now prompt_input will show name_buf as default
                 int got = prompt_input(name_buf, sizeof(name_buf), prompt);
-                if (got >= 0) {
-                    // If empty, use default
-                    if (got == 0) {
-                        strncpy(name_buf, default_name, sizeof(name_buf) - 1);
-                        name_buf[sizeof(name_buf) - 1] = '\0';
-                    }
-                    
-                    // Force .zip extension if not present
+                if (got > 0) {
+                    // Force .zip extension if user removed it
                     size_t nl = strlen(name_buf);
                     if (nl < 4 || strcasecmp(name_buf + nl - 4, ".zip") != 0) {
                         strncat(name_buf, ".zip", sizeof(name_buf) - nl - 1);
@@ -5094,20 +5095,38 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                                 char *new_dest = gen_nonconflicting_path(dest_path);
                                 free(dest_path); dest_path = new_dest;
                             }
-                            // else 'o' (overwrite)
                         }
                         
                         if (!skip && dest_path) {
-                            draw_status("Compressing items to ZIP..."); refresh();
+                            draw_status("Compressing to ZIP..."); refresh();
                             if (zip_compress_items(src_paths, num_src, dest_path, root) == 0) {
                                 draw_status("Compression complete.");
+                                if (g_marks.n > 0) markset_clear(&g_marks);
+                                
+                                // Rebuild view and find the new zip file index
+                                view_free(&dv);
+                                build_dir_view(current, root, &cache, &dv);
+                                size_t new_idx = 0;
+                                int found = 0;
+                                for (size_t i = 0; i < dv.n; i++) {
+                                    if (strcmp(dv.v[i].abs_path, dest_path) == 0) {
+                                        new_idx = i; found = 1; break;
+                                    }
+                                }
+                                if (found) {
+                                    dv.selected = new_idx;
+                                    int rows, cols; getmaxyx(stdscr, rows, cols);
+                                    int list_rows = rows - 3 - (g_decorative ? 2 : 0);
+                                    if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
+                                    if ((int)dv.selected < top) top = (int)dv.selected;
+                                }
+                                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
                             } else {
-                                draw_status("Compression failed or interrupted.");
+                                draw_status("Compression cancelled or failed.");
+                                view_free(&dv);
+                                build_dir_view(current, root, &cache, &dv);
+                                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
                             }
-                            // Rebuild view to show the new zip file
-                            view_free(&dv);
-                            build_dir_view(current, root, &cache, &dv);
-                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
                         }
                         free(dest_path);
                     }
