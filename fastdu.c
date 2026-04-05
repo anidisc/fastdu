@@ -2031,6 +2031,7 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
 
 static void update_miller_columns(const char *current_path, const char *root, Cache *cache, DirView *dv_main) {
     if (!g_miller_mode) return;
+    static char last_path[PATH_MAX] = "";
 
     // 1. Update Parent View (Left)
     char *parent_path = get_parent(current_path);
@@ -2048,6 +2049,11 @@ static void update_miller_columns(const char *current_path, const char *root, Ca
     // 2. Update Preview View (Right)
     if (dv_main->n > 0) {
         ViewEntry *ve = &dv_main->v[dv_main->selected];
+        
+        // Skip if same selection as before
+        if (strcmp(last_path, ve->abs_path) == 0) return;
+        strncpy(last_path, ve->abs_path, sizeof(last_path)); last_path[sizeof(last_path)-1] = '\0';
+
         if (ve->is_dir) {
             if (!g_dv_preview.path || strcmp(g_dv_preview.path, ve->abs_path) != 0) {
                 view_free(&g_dv_preview);
@@ -2058,6 +2064,7 @@ static void update_miller_columns(const char *current_path, const char *root, Ca
         }
     } else {
         view_free(&g_dv_preview);
+        last_path[0] = '\0';
     }
 }
 
@@ -3243,15 +3250,7 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
 }
 
 static void draw_text_preview_column(const char *path, int y, int x, int width, int height) {
-    FILE *fp = NULL;
-    if (g_bat_cmd) {
-        char cmd[PATH_MAX + 128];
-        snprintf(cmd, sizeof(cmd), "%s --style=numbers --color=never --terminal-width=%d \"%s\"", g_bat_cmd, width - 1, path);
-        fp = popen(cmd, "r");
-    } else {
-        fp = fopen(path, "r");
-    }
-
+    FILE *fp = fopen(path, "r");
     if (!fp) {
         attron(COLOR_PAIR(7));
         mvaddstr(y + height/2, x + (width-12)/2, "Access Denied");
@@ -3283,9 +3282,7 @@ static void draw_text_preview_column(const char *path, int y, int x, int width, 
         current_line++;
     }
     attroff(COLOR_PAIR(4));
-    
-    if (g_bat_cmd) pclose(fp);
-    else fclose(fp);
+    fclose(fp);
 }
 
 static void draw_image_preview_column(const char *path, int y, int x, int width, int height) {
