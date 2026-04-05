@@ -3242,7 +3242,20 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
 }
 
 static void draw_text_preview_column(const char *path, int y, int x, int width, int height) {
-    FILE *fp = fopen(path, "r");
+    const char *bat_cmd = NULL;
+    if (system("command -v bat >/dev/null 2>&1") == 0) bat_cmd = "bat";
+    else if (system("command -v batcat >/dev/null 2>&1") == 0) bat_cmd = "batcat";
+
+    FILE *fp = NULL;
+    if (bat_cmd) {
+        char cmd[PATH_MAX + 128];
+        // Use style=numbers,plain to have line numbers if possible, wrap at column width
+        snprintf(cmd, sizeof(cmd), "%s --style=numbers,plain --color=never --terminal-width=%d \"%s\"", bat_cmd, width - 1, path);
+        fp = popen(cmd, "r");
+    } else {
+        fp = fopen(path, "r");
+    }
+
     if (!fp) {
         attron(COLOR_PAIR(7));
         mvaddstr(y + height/2, x + (width-12)/2, "Access Denied");
@@ -3255,7 +3268,6 @@ static void draw_text_preview_column(const char *path, int y, int x, int width, 
     int drawn_lines = 0;
     attron(COLOR_PAIR(4));
     
-    // If focused, draw a distinct indicator or border (optional, but good for UX)
     if (g_preview_focused) {
         attron(A_BOLD);
         mvaddstr(y - 1, x, " [ PREVIEW FOCUS - ESC to exit ] ");
@@ -3264,11 +3276,9 @@ static void draw_text_preview_column(const char *path, int y, int x, int width, 
 
     while (fgets(line, sizeof(line), fp) && drawn_lines < height) {
         if (current_line >= g_preview_scroll_y) {
-            // Clean line from trailing newline
             size_t l = strlen(line);
             while (l > 0 && (line[l-1] == '\n' || line[l-1] == '\r')) line[--l] = '\0';
             
-            // Handle horizontal scroll
             if ((int)l > g_preview_scroll_x) {
                 mvaddnstr(y + drawn_lines, x, line + g_preview_scroll_x, width - 1);
             }
@@ -3277,7 +3287,9 @@ static void draw_text_preview_column(const char *path, int y, int x, int width, 
         current_line++;
     }
     attroff(COLOR_PAIR(4));
-    fclose(fp);
+    
+    if (bat_cmd) pclose(fp);
+    else fclose(fp);
 }
 
 static void draw_image_preview_column(const char *path, int y, int x, int width, int height) {
