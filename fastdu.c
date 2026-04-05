@@ -137,8 +137,8 @@ static void cache_add_ancestors_after_delta(Cache *c, const char *root, const ch
 static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
-#define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.61.0"
+#define CACHE_FILENAME ".fastdu_cache_v3"
+#define FASTDU_VERSION "0.62.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -777,13 +777,14 @@ static char *gen_nonconflicting_path(const char *dst) {
 static char prompt_conflict_action(const char *dst) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
     char msg[PATH_MAX + 256];
-snprintf(msg, sizeof(msg), "Conflict on '%s': [o]verwrite, [r]ename, [s]kip, [O] overwrite all, [R] rename all, [S] skip all ", dst);
+    snprintf(msg, sizeof(msg), "Conflict on '%s': [o]verwrite, [r]ename, [n]ew name, [s]kip, [O] overwrite all, [R] rename all, [S] skip all ", dst);
     mvhline(rows-1, 0, ' ', cols);
     mvaddnstr(rows-1, 0, msg, cols-1);
     refresh();
     int ch = getch();
     if (ch=='o'||ch=='O') return (ch=='O') ? 'O' : 'o';
     if (ch=='r'||ch=='R') return (ch=='R') ? 'R' : 'r';
+    if (ch=='n') return 'n'; // New name option
     if (ch=='s'||ch=='S') return (ch=='S') ? 'S' : 's';
     return 's';
 }
@@ -3540,40 +3541,57 @@ static int prompt_input(char *buf, size_t bufsz, const char *label) {
     mvaddnstr(rows-1, 0, label, cols-1);
     int x_start = (int)strlen(label);
     
-    // Use existing buffer content as default
-    size_t pos = strlen(buf);
-    if (pos >= bufsz) pos = bufsz - 1;
-    buf[pos] = '\0';
-    mvaddstr(rows-1, x_start, buf);
+    size_t len = strlen(buf);
+    size_t cursor_pos = len; // Initial cursor at the end
     
-    while (pos < bufsz - 1) {
-        move(rows-1, x_start + (int)pos);
+    while (1) {
+        // Redraw line
+        mvhline(rows-1, x_start, ' ', cols - x_start);
+        mvaddstr(rows-1, x_start, buf);
+        move(rows-1, x_start + (int)cursor_pos);
         refresh();
-        int ch = getch();
         
+        int ch = getch();
         if (ch == 27) { // ESC
             buf[0] = '\0';
             curs_set(0);
             return -1; 
         } else if (ch == 10 || ch == 13 || ch == KEY_ENTER) { // ENTER
             break;
+        } else if (ch == KEY_LEFT) {
+            if (cursor_pos > 0) cursor_pos--;
+        } else if (ch == KEY_RIGHT) {
+            if (cursor_pos < len) cursor_pos++;
+        } else if (ch == KEY_HOME || ch == 1) { // Home or Ctrl-A
+            cursor_pos = 0;
+        } else if (ch == KEY_END || ch == 5) { // End or Ctrl-E
+            cursor_pos = len;
         } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) { // BACKSPACE
-            if (pos > 0) {
-                pos--;
-                mvaddch(rows-1, x_start + (int)pos, ' ');
+            if (cursor_pos > 0) {
+                memmove(buf + cursor_pos - 1, buf + cursor_pos, len - cursor_pos + 1);
+                len--;
+                cursor_pos--;
+            }
+        } else if (ch == KEY_DC) { // DELETE key
+            if (cursor_pos < len) {
+                memmove(buf + cursor_pos, buf + cursor_pos + 1, len - cursor_pos);
+                len--;
             }
         } else if (isprint(ch)) {
-            buf[pos++] = (char)ch;
-            mvaddch(rows-1, x_start + (int)pos - 1, ch);
+            if (len < bufsz - 1) {
+                memmove(buf + cursor_pos + 1, buf + cursor_pos, len - cursor_pos + 1);
+                buf[cursor_pos] = (char)ch;
+                len++;
+                cursor_pos++;
+            }
         }
     }
-    buf[pos] = '\0';
+    buf[len] = '\0';
     curs_set(0);
     
-    // Trim trailing
-    size_t n = strlen(buf);
-    while (n > 0 && (buf[n-1] == ' ' || buf[n-1] == '\t' || buf[n-1] == '\r')) { buf[--n] = '\0'; }
-    return (int)n;
+    // Trim trailing spaces
+    while (len > 0 && (buf[len-1] == ' ' || buf[len-1] == '\t' || buf[len-1] == '\r')) { buf[--len] = '\0'; }
+    return (int)len;
 }
 
 // Background worker to compute marked files count
@@ -3708,6 +3726,7 @@ static void show_help(void) {
         "  I - size display: numeric → percent → off",
         "  i - info column (mtime → owner+perm → hidden)",
         "  TAB / Ctrl-i - toggle graph bar",
+        "  ALT-r - rename selected item",
         "  q - quit",
         "  h - this help",
         "",
@@ -5137,12 +5156,81 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
         ch = getch();
         if (ch == 'q' || ch == 'Q') break;
-        else if (ch == 27) { // ESC
-            if (g_preview_focused) {
-                g_preview_focused = 0;
-                draw_status("Preview focus DISABLED");
+        else if (ch == 27) { // ESC or ALT sequence
+            nodelay(stdscr, TRUE);
+            int next_ch = getch();
+            nodelay(stdscr, FALSE);
+            if (next_ch == 'r') { // ALT+r: Rename selected
+                if (dv.n > 0) {
+                    ViewEntry *ve = &dv.v[dv.selected];
+                    if (g_inside_archive_path) {
+                        draw_status("Renaming inside archives not supported");
+                    } else {
+                        char name_buf[256];
+                        const char *old_base = path_basename_const(ve->abs_path);
+                        strncpy(name_buf, old_base, sizeof(name_buf)-1);
+                        name_buf[sizeof(name_buf)-1] = '\0';
+                        
+                        int retry = 1;
+                        while (retry) {
+                            retry = 0;
+                            int got = prompt_input(name_buf, sizeof(name_buf), "Rename to: ");
+                            if (got > 0) {
+                                char *new_abs = path_join(current, name_buf);
+                                if (new_abs) {
+                                    if (strcmp(new_abs, ve->abs_path) == 0) {
+                                        free(new_abs); break;
+                                    }
+                                    int skip = 0;
+                                    if (path_exists(new_abs)) {
+                                        char action = prompt_conflict_action(new_abs);
+                                        if (action == 's' || action == 'S') skip = 1;
+                                        else if (action == 'r' || action == 'R') {
+                                            char *auto_new = gen_nonconflicting_path(new_abs);
+                                            free(new_abs); new_abs = auto_new;
+                                        } else if (action == 'n') {
+                                            retry = 1; free(new_abs); continue;
+                                        }
+                                        if (action == 'o' || action == 'O') unlink(new_abs);
+                                    }
+                                    
+                                    if (!skip && new_abs) {
+                                        unsigned long long old_sz = ve->size;
+                                        int old_known = ve->size_known;
+                                        if (rename(ve->abs_path, new_abs) == 0) {
+                                            cache_remove_prefix(&cache, ve->abs_path);
+                                            if (old_known) {
+                                                struct stat stn;
+                                                if (lstat(new_abs, &stn) == 0) {
+                                                    cache_upsert_with_meta(&cache, root, new_abs, old_sz, time(NULL), (unsigned long long)stn.st_ino, stn.st_mtime);
+                                                }
+                                            }
+                                            cache_save(root, &cache);
+                                            view_free(&dv);
+                                            build_dir_view(current, root, &cache, &dv);
+                                            // Find new index
+                                            for(size_t i=0; i<dv.n; i++) {
+                                                if (strcmp(dv.v[i].abs_path, new_abs) == 0) {
+                                                    dv.selected = i; break;
+                                                }
+                                            }
+                                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                                            draw_status("Renamed successfully.");
+                                        } else {
+                                            draw_status("Rename failed.");
+                                        }
+                                    }
+                                    free(new_abs);
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
-                // Potential reset of other UI states if needed
+                if (g_preview_focused) {
+                    g_preview_focused = 0;
+                    draw_status("Preview focus DISABLED");
+                }
             }
         } else if (g_preview_focused) {
             // Internal preview navigation (scrolling)

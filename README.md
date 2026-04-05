@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.61.0**
+- **Current version: 0.61.1**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Rename Items**: Quickly rename any file or directory directly from the TUI (Press `ALT+r`). Includes conflict resolution.
 - **Enhanced Text Previews**: Integrated support for **bat** (or `batcat`) to provide syntax highlighting and advanced paging (Press `v`).
 - **Archive Extraction**: Unpack `.zip`, `.tar`, `.7z`, and more directly from the TUI (Press `x`).
 - **Zip Compression**: Compress files and folders into a `.zip` archive directly from the TUI (Press `z`).
@@ -36,6 +37,17 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.61.1 (Renaming Support)
+
+### ✏️ Item Renaming
+You can now rename files and directories directly within the TUI.
+- **Quick Shortcut**: Press `ALT+r` on any item.
+- **Pre-filled Prompt**: The current name is pre-loaded for easy editing.
+- **Robust Conflicts**: Integrated conflict management (Overwrite, Auto-rename, Manual Retry, Cancel).
+- **Cache Sync**: Automatically updates the internal cache to reflect the name change without full rescans.
 
 ---
 
@@ -270,6 +282,7 @@ Produces the `./fastdu` binary.
   - `Y`: Toggle Baseline Snapshot (Diff Mode)
   - `v`: Preview selected text file (Toggle wrap: `w`)
   - `O`: Open selected item with system default (`xdg-open`)
+  - `ALT+r`: Rename selected item
   - `Ctrl+E`: Edit selected file with external editor
   - `z`: Compress marked/selected items to .zip archive
   - `x`: Extract selected archive

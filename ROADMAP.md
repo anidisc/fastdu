@@ -20,6 +20,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 ### 4. Integrazione di Sistema
 - [x] **Apertura file esterna:** Aggiungere un comando (es. `o`) per aprire il file selezionato con l'applicazione predefinita del sistema (usando `xdg-open` su Linux).
 - [ ] **Integrazione Editor Esterno (Ctrl+E):** Permettere l'apertura e la modifica di file testuali tramite un editor esterno (es. vim, nano, nvim) configurabile nel file `config.toml` o rilevato tramite la variabile `$EDITOR`.
+- [ ] **Compressione ZIP (Ctrl+Z):** Aggiungere la possibilità di comprimere file e cartelle in un archivio .zip direttamente dalla TUI, con supporto per rinomina e gestione conflitti.
 - [x] **Supporto Mount-points:** Opzione per limitare la scansione al filesystem corrente (`-x` / `--one-file-system`), evitando di entrare in partizioni montate o dischi esterni.
 
 ### 5. UX & Personalizzazione (Modernizzazione TUI)
