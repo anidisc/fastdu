@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.60.2"
+#define FASTDU_VERSION "0.60.3"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -5439,10 +5439,14 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
                     }
                 } else if (g_miller_mode && !ve->is_dir && (ch == KEY_RIGHT || ch == 'l')) {
-                    // Focus preview on file
-                    g_preview_focused = 1;
-                    g_preview_scroll_y = 0; g_preview_scroll_x = 0;
-                    draw_status("Preview focus ENABLED - Use Arrows/hjkl to scroll, ESC to exit");
+                    if (is_textual_file(ve->abs_path) || is_image_file(ve->abs_path)) {
+                        // Focus preview on file
+                        g_preview_focused = 1;
+                        g_preview_scroll_y = 0; g_preview_scroll_x = 0;
+                        draw_status("Preview focus ENABLED - Use Arrows/hjkl to scroll, ESC to exit");
+                    } else {
+                        draw_status("Preview focus not available for this file type");
+                    }
                 } else if (is_archive_file(ve->abs_path)) {
                     // Enter archive
                     navstack_push(&nav, current, ve->abs_path, dv.selected, top);
