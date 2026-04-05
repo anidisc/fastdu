@@ -190,6 +190,7 @@ static int g_miller_mode = 0;    // Miller columns (ranger-style) toggle
 static int g_preview_focused = 0; // Focus on the preview column
 static int g_preview_scroll_y = 0;
 static int g_preview_scroll_x = 0;
+static const char *g_bat_cmd = NULL; // Cached bat command
 static dev_t g_root_dev = 0;
 
 typedef struct {
@@ -3242,15 +3243,10 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
 }
 
 static void draw_text_preview_column(const char *path, int y, int x, int width, int height) {
-    const char *bat_cmd = NULL;
-    if (system("command -v bat >/dev/null 2>&1") == 0) bat_cmd = "bat";
-    else if (system("command -v batcat >/dev/null 2>&1") == 0) bat_cmd = "batcat";
-
     FILE *fp = NULL;
-    if (bat_cmd) {
+    if (g_bat_cmd) {
         char cmd[PATH_MAX + 128];
-        // Use style=numbers,plain to have line numbers if possible, wrap at column width
-        snprintf(cmd, sizeof(cmd), "%s --style=numbers,plain --color=never --terminal-width=%d \"%s\"", bat_cmd, width - 1, path);
+        snprintf(cmd, sizeof(cmd), "%s --style=numbers --color=never --terminal-width=%d \"%s\"", g_bat_cmd, width - 1, path);
         fp = popen(cmd, "r");
     } else {
         fp = fopen(path, "r");
@@ -3288,7 +3284,7 @@ static void draw_text_preview_column(const char *path, int y, int x, int width, 
     }
     attroff(COLOR_PAIR(4));
     
-    if (bat_cmd) pclose(fp);
+    if (g_bat_cmd) pclose(fp);
     else fclose(fp);
 }
 
@@ -3912,14 +3908,9 @@ static void show_preview(const char *path) {
         return;
     }
 
-    // Determine if 'bat' or 'batcat' is available
-    const char *bat_cmd = NULL;
-    if (system("command -v bat >/dev/null 2>&1") == 0) bat_cmd = "bat";
-    else if (system("command -v batcat >/dev/null 2>&1") == 0) bat_cmd = "batcat";
-
-    if (bat_cmd) {
+    if (g_bat_cmd) {
         char cmd[PATH_MAX + 128];
-        snprintf(cmd, sizeof(cmd), "%s --paging=always \"%s\"", bat_cmd, path);
+        snprintf(cmd, sizeof(cmd), "%s --paging=always \"%s\"", g_bat_cmd, path);
         
         def_prog_mode();
         endwin();
@@ -4881,6 +4872,11 @@ static void install_signal_handlers(void) {
  */
 int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
+    
+    // Detect bat/batcat once
+    if (system("command -v bat >/dev/null 2>&1") == 0) g_bat_cmd = "bat";
+    else if (system("command -v batcat >/dev/null 2>&1") == 0) g_bat_cmd = "batcat";
+
     const char *dbg_env0 = getenv("FASTDU_DEBUG");
     if (dbg_env0 && dbg_env0[0]=='1') {
         const char msg0[] = "[dbg0] main start\n";
