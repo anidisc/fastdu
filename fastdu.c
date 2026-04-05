@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v2"
-#define FASTDU_VERSION "0.60.4"
+#define FASTDU_VERSION "0.61.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -3899,7 +3899,30 @@ static void show_preview(const char *path) {
         show_image_preview(path);
         return;
     }
-    // Try open file and read lines up to a cap
+
+    // Determine if 'bat' or 'batcat' is available
+    const char *bat_cmd = NULL;
+    if (system("command -v bat >/dev/null 2>&1") == 0) bat_cmd = "bat";
+    else if (system("command -v batcat >/dev/null 2>&1") == 0) bat_cmd = "batcat";
+
+    if (bat_cmd) {
+        char cmd[PATH_MAX + 128];
+        snprintf(cmd, sizeof(cmd), "%s --paging=always \"%s\"", bat_cmd, path);
+        
+        def_prog_mode();
+        endwin();
+        printf("\033[2J\033[H"); fflush(stdout); // Clear screen
+        
+        int rc = system(cmd);
+        (void)rc;
+        
+        printf("\033[2J\033[H"); fflush(stdout); // Clear again
+        reset_prog_mode();
+        refresh();
+        return;
+    }
+
+    // Fallback to internal viewer if 'bat' is not found
     FILE *fp = fopen(path, "r");
     if (!fp) {
         char msg[PATH_MAX + 64];

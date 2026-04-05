@@ -2,13 +2,16 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.58.0**
+- **Current version: 0.61.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Enhanced Text Previews**: Integrated support for **bat** (or `batcat`) to provide syntax highlighting and advanced paging (Press `v`).
+- **Archive Extraction**: Unpack `.zip`, `.tar`, `.7z`, and more directly from the TUI (Press `x`).
+- **Zip Compression**: Compress files and folders into a `.zip` archive directly from the TUI (Press `z`).
 - **External Editor Integration**: Open and edit any text file directly from the TUI (Press `Ctrl+E`).
 - **Ranger-style Navigation**: Multi-column Miller Columns with automatic live previews for text and images (Press `M` to toggle).
 - **Native Image Previews**: High-performance image viewing using the **Kitty Graphics Protocol** (Ghostty, Kitty, WezTerm) or **Chafa** as a fallback. Aspect ratio is always preserved.
@@ -33,6 +36,38 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.61.0 (Syntax Highlighting)
+
+### 📄 Advanced Text Previews
+File inspection is now much better with **bat** integration.
+- **Syntax Highlighting**: Automatically detects file type and applies colors (C, Python, Markdown, etc.).
+- **Smart Paging**: Seamlessly scroll, search, and navigate through large text files.
+- **Auto-fallback**: Uses the built-in internal viewer if `bat` is not installed.
+
+---
+
+## What’s new in 0.60.0 (Archive Extraction)
+
+### 🔓 Integrated Unpacking
+Extract compressed files with full control.
+- **Versatile**: Supports all formats provided by `libarchive` (zip, tar, 7z, iso, etc.).
+- **Flexible Destination**: Extract into a new folder or direttamente into the current directory.
+- **Granular Conflicts**: If files already exist, choose to overwrite, rename, or skip for every single item.
+- **Auto-Sync**: The new contents are instantly scanned and added to the cache.
+
+---
+
+## What’s new in 0.59.0 (Zip Compression)
+
+### 🤐 Built-in Compression
+You can now create `.zip` archives directly within **fastdu**.
+- **Context Aware**: Compresses marked items if any, otherwise the selected item (Press `z`).
+- **Interactive**: Prompt for archive name before starting.
+- **Conflict Management**: Detects if the target zip already exists and asks for overwrite or rename.
+- **Recursive**: Full support for directory tree compression.
 
 ---
 
@@ -236,6 +271,8 @@ Produces the `./fastdu` binary.
   - `v`: Preview selected text file (Toggle wrap: `w`)
   - `O`: Open selected item with system default (`xdg-open`)
   - `Ctrl+E`: Edit selected file with external editor
+  - `z`: Compress marked/selected items to .zip archive
+  - `x`: Extract selected archive
 - **Sorting**: `o` toggles sort key (size → name → mtime → delta), `s` toggles order (asc/desc)
 - **Display**:
   - `I`: Cycles size column (numeric → percent → hidden)
