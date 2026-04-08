@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.63.0"
+#define FASTDU_VERSION "0.64.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -3738,6 +3738,8 @@ static void show_help(void) {
         "  O - open selected item with system default (xdg-open)",
         "  Ctrl-E - edit selected file with external editor",
         "  Ctrl-S - drop to subshell in current directory",
+        "  Ctrl-n - create new folder",
+        "  ALT-n - create new empty file",
         "  z - compress marked/selected items to .zip",
         "  x - extract selected archive",
         "  r - rescan selected dir",
@@ -5267,10 +5269,74 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                         }
                     }
                 }
+            } else if (next_ch == 'n') { // ALT+n: New File
+                if (g_inside_archive_path) {
+                    draw_status("Cannot create files inside archives");
+                } else {
+                    char name_buf[256] = "";
+                    int got = prompt_input(name_buf, sizeof(name_buf), "New file name: ");
+                    if (got > 0) {
+                        char *abs = path_join(current, name_buf);
+                        if (abs) {
+                            if (path_exists(abs)) {
+                                draw_status("File already exists!");
+                            } else {
+                                int fd = creat(abs, 0644);
+                                if (fd >= 0) {
+                                    close(fd);
+                                    struct stat st;
+                                    if (lstat(abs, &st) == 0) {
+                                        cache_upsert_with_meta(&cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                                        cache_add_ancestors_after_delta(&cache, root, abs, 0);
+                                        g_last_files++;
+                                    }
+                                    view_free(&dv);
+                                    build_dir_view(current, root, &cache, &dv);
+                                    for(size_t i=0; i<dv.n; i++) { if (strcmp(dv.v[i].abs_path, abs) == 0) { dv.selected = i; break; } }
+                                    if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                                    draw_status("File created.");
+                                } else {
+                                    draw_status("Failed to create file.");
+                                }
+                            }
+                            free(abs);
+                        }
+                    }
+                }
             } else {
                 if (g_preview_focused) {
                     g_preview_focused = 0;
                     draw_status("Preview focus DISABLED");
+                }
+            }
+        } else if (ch == 14) { // Ctrl-n: New Folder
+            if (g_inside_archive_path) {
+                draw_status("Cannot create folders inside archives");
+            } else {
+                char name_buf[256] = "";
+                int got = prompt_input(name_buf, sizeof(name_buf), "New folder name: ");
+                if (got > 0) {
+                    char *abs = path_join(current, name_buf);
+                    if (abs) {
+                        if (path_exists(abs)) {
+                            draw_status("Folder already exists!");
+                        } else {
+                            if (mkdir(abs, 0755) == 0) {
+                                struct stat st;
+                                if (lstat(abs, &st) == 0) {
+                                    cache_upsert_with_meta(&cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                                }
+                                view_free(&dv);
+                                build_dir_view(current, root, &cache, &dv);
+                                for(size_t i=0; i<dv.n; i++) { if (strcmp(dv.v[i].abs_path, abs) == 0) { dv.selected = i; break; } }
+                                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                                draw_status("Folder created.");
+                            } else {
+                                draw_status("Failed to create folder.");
+                            }
+                        }
+                        free(abs);
+                    }
                 }
             }
         } else if (g_preview_focused) {

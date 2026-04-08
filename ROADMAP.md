@@ -16,16 +16,25 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 ### 3. Esportazione Dati
 - [x] **Export JSON/CSV:** Permettere il salvataggio dei risultati della scansione in formati strutturati per analisi esterne o reportistica.
 - [x] **Snapshot Comparison:** Funzione per confrontare la cache attuale con un riferimento (da file o istantaneo in memoria) per mostrare variazioni di spazio.
-
 ### 4. Integrazione di Sistema
 - [x] **Apertura file esterna:** Aggiungere un comando (es. `o`) per aprire il file selezionato con l'applicazione predefinita del sistema (usando `xdg-open` su Linux).
-- [ ] **Integrazione Editor Esterno (Ctrl+E):** Permettere l'apertura e la modifica di file testuali tramite un editor esterno (es. vim, nano, nvim) configurabile nel file `config.toml` o rilevato tramite la variabile `$EDITOR`.
-- [ ] **Compressione ZIP (Ctrl+Z):** Aggiungere la possibilità di comprimere file e cartelle in un archivio .zip direttamente dalla TUI, con supporto per rinomina e gestione conflitti.
-- [x] **Supporto Mount-points:** Opzione per limitare la scansione al filesystem corrente (`-x` / `--one-file-system`), evitando di entrare in partizioni montate o dischi esterni.
+- [x] **Integrazione Editor Esterno (Ctrl+E):** Permettere l'apertura e la modifica di file testuali tramite un editor esterno (es. vim, nano, nvim).
+- [x] **Compressione ZIP (z):** Aggiungere la possibilità di comprimere file e cartelle in un archivio .zip direttamente dalla TUI, con supporto per rinomina e gestione conflitti.
+- [x] **Estrazione Archivi (x):** Scompattare archivi (.zip, .tar, etc.) in una cartella o nella directory corrente con gestione conflitti per-file.
+- [x] **Rinomina Elementi (ALT+r):** Rinominare file e directory con pre-caricamento del nome e gestione conflitti.
+- [x] **Accesso alla Shell (Ctrl+S):** Uscire temporaneamente alla shell nella cartella corrente e tornare al programma con 'exit'.
+- [x] **Supporto Mount-points:** Opzione per limitare la scansione al filesystem corrente (`-x` / `--one-file-system`).
 
 ### 5. UX & Personalizzazione (Modernizzazione TUI)
-- [x] **Supporto Mouse:** Implementare lo scrolling con la rotellina e la selezione/apertura di directory tramite click (protocollo ncurses mouse).
-- [x] **Breadcrumbs Navigabili:** Mostrare il percorso corrente in alto in modo più leggibile e permettere di saltare a cartelle superiori con un click (se il mouse è attivo).
+- [x] **Supporto Mouse:** Scrolling, selezione e navigazione tramite click.
+- [x] **Editor di Linea Avanzato:** Tutti i prompt di input ora supportano lo spostamento del cursore (frecce), Home/End e inserimento.
+- [x] **Breadcrumbs Navigabili:** Percorso cliccabile per navigazione rapida ai genitori.
+...
+### 9. Gestione File Avanzata (Next Goals)
+- [ ] **Creazione Rapida (n/N):** Tasto `n` per creare una nuova cartella (`mkdir`) e `N` (o `ALT+n`) per un nuovo file vuoto (`touch`).
+- [ ] **Ricerca Globale Istantanea:** Sfruttare la cache per cercare file in tutto l'albero scansionato, non solo nella cartella corrente.
+- [ ] **Ordinamento Avanzato (o):** Cicliare l'ordinamento tra Dimensione, Nome, Data di modifica ed Estensione.
+
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
 
