@@ -31,7 +31,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Breadcrumbs Navigabili:** Percorso cliccabile per navigazione rapida ai genitori.
 ...
 ### 9. Gestione File Avanzata (Next Goals)
-- [ ] **Creazione Rapida (n/N):** Tasto `n` per creare una nuova cartella (`mkdir`) e `N` (o `ALT+n`) per un nuovo file vuoto (`touch`).
+- [x] **Creazione Rapida (Ctrl+n / ALT+n):** Tasto `Ctrl+n` per creare una nuova cartella (`mkdir`) e `ALT+n` per un nuovo file vuoto (`touch`).
 - [ ] **Ricerca Globale Istantanea:** Sfruttare la cache per cercare file in tutto l'albero scansionato, non solo nella cartella corrente.
 - [ ] **Ordinamento Avanzato (o):** Cicliare l'ordinamento tra Dimensione, Nome, Data di modifica ed Estensione.
 

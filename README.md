@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.64.0**
+- **Current version: 0.65.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Instant Global Search**: Search for any file or directory in the entire scanned cache instantly (Press `/`).
 - **Quick Creation**: Create new folders (`Ctrl+n`) and empty files (`ALT+n`) directly from the TUI.
 - **Subshell Access**: Drop into a shell at your current browsing directory directly from the TUI (Press `Ctrl+S`).
 - **Rename Items**: Quickly rename any file or directory directly from the TUI (Press `ALT+r`). Includes conflict resolution.
@@ -39,6 +40,16 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.65.0 (Instant Global Search)
+
+### 🔍 Search Everywhere
+Leverage the power of the in-memory cache to find anything, anywhere.
+- **Lightning Fast**: Scans millions of entries in milliseconds.
+- **Context Jumper**: Select a result and press `Enter` to jump directly to its parent directory with the item pre-selected.
+- **Deep Discovery**: Finds files even in deeply nested subdirectories that haven't been visited in the current session.
 
 ---
 
@@ -317,7 +328,7 @@ Produces the `./fastdu` binary.
   - `I`: Cycles size column (numeric → percent → hidden)
   - `i`: Cycles info column (mtime → owner+perm → hidden)
 - **Filters**: `t` cycles type filter (all/dirs/files); `T` toggles the query filter; `Ctrl+T` resets all filters.
-- **Search**: `f` substring (case-insensitive); `F` regex; `n`/`N` next/prev match
+- **Search**: `/` global cache search; `f` substring (case-insensitive); `F` regex; `n`/`N` next/prev match
 - **Help/Quit**: `h` help; `q` quit
 
 ---

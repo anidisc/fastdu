@@ -138,7 +138,18 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.64.0"
+#define FASTDU_VERSION "0.65.0"
+
+static int g_global_search_mode = 0;
+typedef struct {
+    char *abs_path;
+    unsigned long long size;
+} SearchResult;
+static SearchResult *g_search_results = NULL;
+static size_t g_search_results_count = 0;
+static size_t g_search_results_cap = 0;
+static int g_search_selected = 0;
+static int g_search_top = 0;
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -1555,6 +1566,46 @@ static atomic_int g_mf_inflight = 0;               // 1 when a background count 
 static atomic_ullong g_marked_files_value = 0ULL;  // last computed value (eventually consistent)
 
 static void schedule_marked_files_recalc(void);
+
+static void search_results_free(void) {
+    for (size_t i = 0; i < g_search_results_count; i++) {
+        free(g_search_results[i].abs_path);
+    }
+    free(g_search_results);
+    g_search_results = NULL;
+    g_search_results_count = 0;
+    g_search_results_cap = 0;
+}
+
+static void perform_global_search(Cache *cache, const char *query) {
+    search_results_free();
+    if (!query || query[0] == '\0') return;
+
+    for (int i = 0; i < CACHE_SHARDS; i++) {
+        pthread_mutex_lock(&cache->shards[i].mu);
+        for (size_t j = 0; j < cache->shards[i].n; j++) {
+            CacheEntry *e = &cache->shards[i].v[j];
+            if (strcasestr_bool(e->abs_path, query)) {
+                if (g_search_results_count >= 1000) break; // Limit to 1000 results
+                
+                if (g_search_results_count == g_search_results_cap) {
+                    size_t newcap = g_search_results_cap ? g_search_results_cap * 2 : 64;
+                    void *nv = realloc(g_search_results, newcap * sizeof(SearchResult));
+                    if (!nv) break;
+                    g_search_results = (SearchResult*)nv;
+                    g_search_results_cap = newcap;
+                }
+                g_search_results[g_search_results_count].abs_path = xstrdup(e->abs_path);
+                g_search_results[g_search_results_count].size = e->size;
+                g_search_results_count++;
+            }
+        }
+        pthread_mutex_unlock(&cache->shards[i].mu);
+        if (g_search_results_count >= 1000) break;
+    }
+    g_search_selected = 0;
+    g_search_top = 0;
+}
 
 static void markset_init(MarkSet *m) { m->paths = NULL; m->n = m->cap = 0; }
 static void markset_free(MarkSet *m) { for (size_t i=0;i<m->n;i++) free(m->paths[i]); free(m->paths); m->paths=NULL; m->n=m->cap=0; }
@@ -3374,6 +3425,38 @@ static void draw_column(const DirView *dv, int top, int x, int width, int is_act
  * - Uses distinct colors for directories and files.
  * - Highlights the selected row with reverse + bold.
  */
+static void draw_search_results(int rows, int cols) {
+    attron(COLOR_PAIR(2) | A_BOLD);
+    mvhline(1, 0, ' ', cols);
+    mvprintw(1, 0, " Global Search Results: %zu matches (Limit 1000) ", g_search_results_count);
+    attroff(COLOR_PAIR(2) | A_BOLD);
+
+    int list_rows = rows - 3 - (g_decorative ? 2 : 0);
+    for (int i = 0; i < list_rows; i++) {
+        int idx = g_search_top + i;
+        if (idx >= (int)g_search_results_count) break;
+
+        int y = (g_decorative ? 3 : 2) + i;
+        int is_sel = (idx == g_search_selected);
+
+        if (is_sel) attron(COLOR_PAIR(8) | A_BOLD);
+        else attron(COLOR_PAIR(4));
+
+        mvhline(y, 0, ' ', cols);
+        char szbuf[32]; human_size(g_search_results[idx].size, szbuf, sizeof(szbuf));
+        mvaddstr(y, 0, szbuf);
+        mvprintw(y, 10, " %s", g_search_results[idx].abs_path);
+
+        if (is_sel) attroff(COLOR_PAIR(8) | A_BOLD);
+        else attroff(COLOR_PAIR(4));
+    }
+    
+    mvhline(rows-1, 0, ' ', cols);
+    attron(COLOR_PAIR(2));
+    mvprintw(rows-1, 0, " [Enter] Jump to location  [ESC/q] Exit Search");
+    attroff(COLOR_PAIR(2));
+}
+
 static void draw_list(const DirView *dv, int top) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
     if (!g_miller_mode || cols < 60) {
@@ -3744,6 +3827,7 @@ static void show_help(void) {
         "  x - extract selected archive",
         "  r - rescan selected dir",
         "  R - rescan current dir (parallel)",
+        "  / - global search (entire cache)",
         "  f - find by name (case-insensitive), n/N next/prev",
         "  F - regex search (case-insensitive), enables query filter",
         "  t - toggle type filter (all/dirs/files)",
@@ -5189,6 +5273,67 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
 
     int ch;
     while (1) {
+        if (g_global_search_mode) {
+            int rows, cols; getmaxyx(stdscr, rows, cols);
+            erase();
+            draw_header(root, current, &cache);
+            draw_search_results(rows, cols);
+            refresh();
+
+            ch = getch();
+            if (ch == 'q' || ch == 'Q' || ch == 27) {
+                g_global_search_mode = 0;
+                search_results_free();
+                continue;
+            }
+            if (ch == KEY_UP || ch == 'k') {
+                if (g_search_selected > 0) {
+                    g_search_selected--;
+                    if (g_search_selected < g_search_top) g_search_top = g_search_selected;
+                }
+            } else if (ch == KEY_DOWN || ch == 'j') {
+                if (g_search_selected + 1 < (int)g_search_results_count) {
+                    g_search_selected++;
+                    int list_rows = rows - 3 - (g_decorative ? 2 : 0);
+                    if (g_search_selected >= g_search_top + list_rows) g_search_top = g_search_selected - list_rows + 1;
+                }
+            } else if (ch == 10 || ch == 13 || ch == KEY_ENTER) {
+                if (g_search_results_count > 0) {
+                    char *target = xstrdup(g_search_results[g_search_selected].abs_path);
+                    g_global_search_mode = 0;
+                    search_results_free();
+
+                    // Jump to target logic
+                    struct stat st;
+                    if (lstat(target, &st) == 0) {
+                        char *parent = get_parent(target);
+                        if (parent) {
+                            // If it's a directory, we can jump into it or its parent.
+                            // Better jump to parent and select the item.
+                            strncpy(current, parent, sizeof(current)); current[sizeof(current)-1] = '\0';
+                            view_free(&dv); top = 0;
+                            build_dir_view(current, root, &cache, &dv);
+                            // Select the item
+                            for (size_t i = 0; i < dv.n; i++) {
+                                if (strcmp(dv.v[i].abs_path, target) == 0) {
+                                    dv.selected = i; 
+                                    int r, c; getmaxyx(stdscr, r, c);
+                                    int lr = r - 3 - (g_decorative ? 2 : 0);
+                                    if ((int)dv.selected >= top + lr) top = (int)dv.selected - lr + 1;
+                                    break;
+                                }
+                            }
+                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                            free(parent);
+                        }
+                    }
+                    free(target);
+                }
+                continue;
+            }
+            continue;
+        }
+
         // Handle automatic updates (if any) and trigger redraw if needed
         (void)maybe_rescan_hovered(&dv, root, &cache);
 
@@ -5877,6 +6022,17 @@ draw_status("Deselected all in view");
                 } else {
                     for (size_t i = 0; i < dv.n; i++) markset_add(&g_marks, dv.v[i].abs_path);
 draw_status("Selected all in view");
+                }
+            }
+        } else if (ch == '/') { // Global Search
+            char q[256] = "";
+            int got = prompt_input(q, sizeof(q), "Global Search (entire cache): ");
+            if (got > 0) {
+                perform_global_search(&cache, q);
+                if (g_search_results_count > 0) {
+                    g_global_search_mode = 1;
+                } else {
+                    draw_status("No matches found in cache.");
                 }
             }
         } else if (ch == 'f') {
