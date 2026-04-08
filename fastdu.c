@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.62.0"
+#define FASTDU_VERSION "0.63.0"
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -3468,6 +3468,38 @@ static void draw_list(const DirView *dv, int top) {
     }
 }
 
+static void launch_subshell(const char *path) {
+    const char *shell = getenv("SHELL");
+    if (!shell) shell = "/bin/sh";
+
+    char old_cwd[PATH_MAX];
+    if (!getcwd(old_cwd, sizeof(old_cwd))) old_cwd[0] = '\0';
+
+    def_prog_mode();
+    endwin();
+    
+    printf("\n[fastdu] Dropping to subshell in: %s\n", path);
+    printf("[fastdu] Type 'exit' or press Ctrl-D to return to fastdu.\n\n");
+    fflush(stdout);
+
+    if (chdir(path) == 0) {
+        int rc = system(shell);
+        (void)rc;
+        if (old_cwd[0] != '\0') {
+            int r = chdir(old_cwd);
+            (void)r;
+        }
+    } else {
+        perror("chdir");
+        printf("\nPress Enter to continue...");
+        getchar();
+    }
+
+    printf("\033[2J\033[H"); fflush(stdout); // Clear screen
+    reset_prog_mode();
+    refresh();
+}
+
 static void launch_external_editor(const char *path) {
     char cmd[PATH_MAX + 256];
     const char *editor = g_config.editor;
@@ -3705,6 +3737,7 @@ static void show_help(void) {
         "  U - duplicate finder (waste space analyzer)",
         "  O - open selected item with system default (xdg-open)",
         "  Ctrl-E - edit selected file with external editor",
+        "  Ctrl-S - drop to subshell in current directory",
         "  z - compress marked/selected items to .zip",
         "  x - extract selected archive",
         "  r - rescan selected dir",
@@ -4995,6 +5028,14 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         initscr();
         cbreak(); // Standard input mode
         noecho();
+        
+        // Disable flow control so Ctrl-S can be used as a shortcut
+        struct termios t;
+        if (tcgetattr(STDIN_FILENO, &t) == 0) {
+            t.c_iflag &= ~(IXON | IXOFF);
+            tcsetattr(STDIN_FILENO, TCSANOW, &t);
+        }
+
         keypad(stdscr, TRUE);
         mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
         curs_set(0);
@@ -5420,6 +5461,16 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                 }
                 for (size_t i = 0; i < num_src; i++) free(src_paths[i]);
                 free(src_paths);
+            }
+        } else if (ch == 19) { // Ctrl-S: Subshell
+            if (g_inside_archive_path) {
+                draw_status("Subshell not available inside archives");
+            } else {
+                launch_subshell(current);
+                // Rescan current dir in case user modified anything
+                view_free(&dv);
+                build_dir_view(current, root, &cache, &dv);
+                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
             }
         } else if (ch == 20) { // Ctrl-T: reset all filters
             g_filter_mode = FILTER_ALL;

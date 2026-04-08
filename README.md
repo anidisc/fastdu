@@ -2,13 +2,14 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.61.1**
+- **Current version: 0.63.0**
 - **License: MIT**
 
 ---
 
 ## Highlights
 
+- **Subshell Access**: Drop into a shell at your current browsing directory directly from the TUI (Press `Ctrl+S`).
 - **Rename Items**: Quickly rename any file or directory directly from the TUI (Press `ALT+r`). Includes conflict resolution.
 - **Enhanced Text Previews**: Integrated support for **bat** (or `batcat`) to provide syntax highlighting and advanced paging (Press `v`).
 - **Archive Extraction**: Unpack `.zip`, `.tar`, `.7z`, and more directly from the TUI (Press `x`).
@@ -37,6 +38,16 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.63.0 (Subshell Access)
+
+### 🐚 Instant Shell Access
+You can now jump to your terminal's shell without losing your place in **fastdu**.
+- **Context Aware**: The shell opens exactly in the directory you are currently browsing.
+- **Seamless Flow**: Press `Ctrl+S` to drop to shell, type `exit` or `Ctrl+D` to return to exactly where you were.
+- **Auto-Sync**: When you return, **fastdu** automatically refreshes the current view to reflect any changes made in the shell.
 
 ---
 
@@ -283,6 +294,7 @@ Produces the `./fastdu` binary.
   - `v`: Preview selected text file (Toggle wrap: `w`)
   - `O`: Open selected item with system default (`xdg-open`)
   - `ALT+r`: Rename selected item
+  - `Ctrl+S`: Drop to subshell in current directory
   - `Ctrl+E`: Edit selected file with external editor
   - `z`: Compress marked/selected items to .zip archive
   - `x`: Extract selected archive
