@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.72.1"
+#define FASTDU_VERSION "0.73.0"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -177,11 +177,12 @@ static int g_tree_mode = 0; // Tree view mode toggle
 // ------------------------------
 // Remote Protocol (Simplified Text-based)
 // ------------------------------
-static void handle_remote_command(const char *cmd, const char *root, const char *target) {
+static void handle_remote_command(const char *cmd, const char *root, int argc, const char **argv) {
     if (strcmp(cmd, "delete") == 0) {
+        if (argc < 1) { printf("ERROR missing target\n"); return; }
+        const char *target = argv[0];
         Cache cache; cache_init(&cache);
         if (cache_load(root, &cache) <= 0) {
-            // Se non c'è cache, proviamo comunque a cancellare ma non aggiorniamo cache
             if (remove_tree(target, NULL) == 0) printf("OK\n");
             else printf("ERROR could not delete file\n");
             cache_free(&cache);
@@ -195,13 +196,38 @@ static void handle_remote_command(const char *cmd, const char *root, const char 
                 cache_adjust_ancestors_after_delta(&cache, root, target, (long long)(-sz));
                 cache_save(root, &cache);
                 printf("OK\n");
-            } else {
-                printf("ERROR physical delete failed\n");
-            }
+            } else { printf("ERROR physical delete failed\n"); }
         } else {
-            // Elemento non in cache, proviamo a cancellare comunque
             if (remove_tree(target, NULL) == 0) printf("OK\n");
             else printf("ERROR item not found\n");
+        }
+        cache_free(&cache);
+    } else if (strcmp(cmd, "rename") == 0) {
+        if (argc < 2) { printf("ERROR missing target or new name\n"); return; }
+        const char *old_p = argv[0];
+        const char *new_p = argv[1];
+        
+        Cache cache; cache_init(&cache);
+        int has_cache = (cache_load(root, &cache) > 0);
+        
+        unsigned long long sz = 0;
+        if (has_cache) cache_get_info(&cache, old_p, &sz, NULL, NULL);
+        
+        if (rename(old_p, new_p) == 0) {
+            if (has_cache) {
+                cache_remove_prefix(&cache, old_p);
+                cache_adjust_ancestors_after_delta(&cache, root, old_p, (long long)(-sz));
+                
+                struct stat st;
+                if (lstat(new_p, &st) == 0) {
+                    cache_upsert_with_meta(&cache, root, new_p, sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                    cache_add_ancestors_after_delta(&cache, root, new_p, sz);
+                }
+                cache_save(root, &cache);
+            }
+            printf("OK\n");
+        } else {
+            printf("ERROR rename failed: %s\n", strerror(errno));
         }
         cache_free(&cache);
     } else {
@@ -290,6 +316,35 @@ static int remote_delete(const char *target_abs) {
     } else {
         snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd delete '%s' '%s'\"", 
                  host, g_server_root, rpath);
+    }
+    
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return -1;
+    
+    char res[64] = "";
+    if (fgets(res, sizeof(res), fp)) {
+        if (strncmp(res, "OK", 2) == 0) {
+            pclose(fp);
+            return 0;
+        }
+    }
+    pclose(fp);
+    return -1;
+}
+
+static int remote_rename(const char *old_abs, const char *new_abs) {
+    char host[256], old_rpath[PATH_MAX], new_rpath[PATH_MAX];
+    if (!parse_remote_uri(old_abs, host, old_rpath)) return -1;
+    if (!parse_remote_uri(new_abs, host, new_rpath)) return -1;
+    
+    char cmd[PATH_MAX * 2 + 512];
+    // Sintassi server: --remote-cmd rename <root> <old_path> <new_path>
+    if (g_ssh_socket[0] != '\0') {
+        snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"fastdu --remote-cmd rename '%s' '%s' '%s'\"", 
+                 g_ssh_socket, host, g_server_root, old_rpath, new_rpath);
+    } else {
+        snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd rename '%s' '%s' '%s'\"", 
+                 host, g_server_root, old_rpath, new_rpath);
     }
     
     FILE *fp = popen(cmd, "r");
@@ -5526,10 +5581,10 @@ int main(int argc, char **argv) {
     }
 
     if (remote_cmd) {
-        // Syntax: --remote-cmd cmd root target
-        const char *target = (num_path_args > 1) ? path_args[1] : NULL;
-        if (!target) { printf("ERROR missing target\n"); return 1; }
-        handle_remote_command(remote_cmd, root_in, target);
+        // Syntax: --remote-cmd cmd root target1 [target2]
+        if (num_path_args < 2) { printf("ERROR missing target arguments\n"); return 1; }
+        // Pass all positional args starting from the second one (index 1)
+        handle_remote_command(remote_cmd, root_in, num_path_args - 1, &path_args[1]);
         return 0;
     }
 
@@ -5864,15 +5919,29 @@ int main(int argc, char **argv) {
                                     if (!skip && new_abs) {
                                         unsigned long long old_sz = ve->size;
                                         int old_known = ve->size_known;
-                                        if (rename(ve->abs_path, new_abs) == 0) {
+                                        int rc = -1;
+                                        if (g_is_remote) {
+                                            rc = remote_rename(ve->abs_path, new_abs);
+                                        } else {
+                                            rc = rename(ve->abs_path, new_abs);
+                                        }
+
+                                        if (rc == 0) {
                                             cache_remove_prefix(&cache, ve->abs_path);
                                             if (old_known) {
-                                                struct stat stn;
-                                                if (lstat(new_abs, &stn) == 0) {
-                                                    cache_upsert_with_meta(&cache, root, new_abs, old_sz, time(NULL), (unsigned long long)stn.st_ino, stn.st_mtime);
+                                                if (g_is_remote) {
+                                                    // Per il remoto, simuliamo l'entry nella cache locale
+                                                    // Usiamo ino=1 se era una dir, 0 se era un file
+                                                    cache_upsert_with_meta(&cache, root, new_abs, old_sz, time(NULL), ve->is_dir ? 1 : 0, ve->mtime);
+                                                } else {
+                                                    struct stat stn;
+                                                    if (lstat(new_abs, &stn) == 0) {
+                                                        cache_upsert_with_meta(&cache, root, new_abs, old_sz, time(NULL), (unsigned long long)stn.st_ino, stn.st_mtime);
+                                                    }
                                                 }
                                             }
-                                            cache_save(root, &cache);
+                                            if (!g_is_remote) cache_save(root, &cache);
+                                            
                                             view_free(&dv);
                                             build_dir_view(current, root, &cache, &dv);
                                             // Find new index
