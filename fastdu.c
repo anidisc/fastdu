@@ -2693,7 +2693,9 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
 
     // --- Line 0: Main Header ---
     move(0, 0);
-    attron(COLOR_PAIR(1)); addstr(" fastdu - root: ");
+    attron(COLOR_PAIR(1)); addstr(" fastdu ");
+    attron(A_BOLD); addstr(FASTDU_VERSION);
+    attron(A_NORMAL); addstr(" - root: ");
     attron(COLOR_PAIR(8) | A_BOLD); addstr(root);
     attron(COLOR_PAIR(1)); addstr(" - cwd: ");
     
@@ -3995,6 +3997,9 @@ static void show_help(void) {
         "",
         "CLI:",
         "  fastdu [-R] [-x] [-e PAT] [-j N] [--export FMT FILE] [path]",
+        "",
+        "Version:",
+        "  fastdu v" FASTDU_VERSION,
         NULL
     };
 
@@ -4009,7 +4014,8 @@ static void show_help(void) {
         box(win, 0, 0);
         // Title
         wattron(win, A_REVERSE | A_BOLD);
-        const char *title = " Help - arrows to scroll, q to close ";
+        char title[128];
+        snprintf(title, sizeof(title), " fastdu v%s - Help ", FASTDU_VERSION);
         mvwaddnstr(win, 0, 2, title, w - 4);
         wattroff(win, A_REVERSE | A_BOLD);
         // Content area
