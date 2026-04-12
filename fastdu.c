@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.65.1"
+#define FASTDU_VERSION "0.65.2"
 
 static int g_global_search_mode = 0;
 typedef struct {
@@ -146,11 +146,15 @@ typedef struct {
     unsigned long long size;
     int is_dir;
 } SearchResult;
+static SearchResult *g_search_raw = NULL;
+static size_t g_search_raw_count = 0;
+static size_t g_search_raw_cap = 0;
 static SearchResult *g_search_results = NULL;
 static size_t g_search_results_count = 0;
 static size_t g_search_results_cap = 0;
 static int g_search_selected = 0;
 static int g_search_top = 0;
+static int g_search_filter = 0; // 0=all, 1=dirs, 2=files
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
@@ -1569,13 +1573,48 @@ static atomic_ullong g_marked_files_value = 0ULL;  // last computed value (event
 static void schedule_marked_files_recalc(void);
 
 static void search_results_free(void) {
-    for (size_t i = 0; i < g_search_results_count; i++) {
-        free(g_search_results[i].abs_path);
+    for (size_t i = 0; i < g_search_raw_count; i++) {
+        free(g_search_raw[i].abs_path);
     }
+    free(g_search_raw);
+    g_search_raw = NULL; g_search_raw_count = 0; g_search_raw_cap = 0;
+
     free(g_search_results);
-    g_search_results = NULL;
+    g_search_results = NULL; g_search_results_count = 0; g_search_results_cap = 0;
+}
+
+static int cmp_search_results(const void *a, const void *b) {
+    const SearchResult *ra = (const SearchResult *)a;
+    const SearchResult *rb = (const SearchResult *)b;
+    if (ra->is_dir != rb->is_dir) return rb->is_dir - ra->is_dir; // Dirs first
+    if (ra->size != rb->size) return (rb->size < ra->size) ? 1 : -1; // Largest size first
+    return strcmp(ra->abs_path, rb->abs_path); // Then alpha
+}
+
+static void apply_search_filter(void) {
     g_search_results_count = 0;
-    g_search_results_cap = 0;
+    for (size_t i = 0; i < g_search_raw_count; i++) {
+        int match = 0;
+        if (g_search_filter == 0) match = 1;
+        else if (g_search_filter == 1 && g_search_raw[i].is_dir) match = 1;
+        else if (g_search_filter == 2 && !g_search_raw[i].is_dir) match = 1;
+        
+        if (match) {
+            if (g_search_results_count == g_search_results_cap) {
+                size_t nc = g_search_results_cap ? g_search_results_cap * 2 : 64;
+                void *nv = realloc(g_search_results, nc * sizeof(SearchResult));
+                if (!nv) break;
+                g_search_results = (SearchResult*)nv;
+                g_search_results_cap = nc;
+            }
+            g_search_results[g_search_results_count++] = g_search_raw[i];
+        }
+    }
+    if (g_search_results_count > 0) {
+        qsort(g_search_results, g_search_results_count, sizeof(SearchResult), cmp_search_results);
+    }
+    g_search_selected = 0;
+    g_search_top = 0;
 }
 
 static void perform_global_search(Cache *cache, const char *query) {
@@ -1599,33 +1638,31 @@ static void perform_global_search(Cache *cache, const char *query) {
             }
 
             if (match) {
-                if (g_search_results_count >= 1000) break;
+                if (g_search_raw_count >= 2000) break; // Allow more raw matches
                 
-                if (g_search_results_count == g_search_results_cap) {
-                    size_t newcap = g_search_results_cap ? g_search_results_cap * 2 : 64;
-                    void *nv = realloc(g_search_results, newcap * sizeof(SearchResult));
+                if (g_search_raw_count == g_search_raw_cap) {
+                    size_t newcap = g_search_raw_cap ? g_search_raw_cap * 2 : 64;
+                    void *nv = realloc(g_search_raw, newcap * sizeof(SearchResult));
                     if (!nv) break;
-                    g_search_results = (SearchResult*)nv;
-                    g_search_results_cap = newcap;
+                    g_search_raw = (SearchResult*)nv;
+                    g_search_raw_cap = newcap;
                 }
-                g_search_results[g_search_results_count].abs_path = xstrdup(e->abs_path);
-                g_search_results[g_search_results_count].size = e->size;
-                // Heuristic for is_dir: directories in cache usually have ino > 0 and often size 0 if just created or actual dir size if scanned
-                // For precision, we can use a quick stat only on matches
+                g_search_raw[g_search_raw_count].abs_path = xstrdup(e->abs_path);
+                g_search_raw[g_search_raw_count].size = e->size;
+                
                 struct stat st;
                 if (lstat(e->abs_path, &st) == 0) {
-                    g_search_results[g_search_results_count].is_dir = S_ISDIR(st.st_mode);
+                    g_search_raw[g_search_raw_count].is_dir = S_ISDIR(st.st_mode);
                 } else {
-                    g_search_results[g_search_results_count].is_dir = (e->ino > 0 && e->size == 0);
+                    g_search_raw[g_search_raw_count].is_dir = (e->ino > 0 && e->size == 0);
                 }
-                g_search_results_count++;
+                g_search_raw_count++;
             }
         }
         pthread_mutex_unlock(&cache->shards[i].mu);
-        if (g_search_results_count >= 1000) break;
+        if (g_search_raw_count >= 2000) break;
     }
-    g_search_selected = 0;
-    g_search_top = 0;
+    apply_search_filter();
 }
 
 static void markset_init(MarkSet *m) { m->paths = NULL; m->n = m->cap = 0; }
@@ -3449,7 +3486,8 @@ static void draw_column(const DirView *dv, int top, int x, int width, int is_act
 static void draw_search_results(int rows, int cols) {
     attron(COLOR_PAIR(2) | A_BOLD);
     mvhline(1, 0, ' ', cols);
-    mvprintw(1, 0, " Global Search (Basename match, use '/' prefix for Path search) - %zu matches ", g_search_results_count);
+    const char *fstr = (g_search_filter == 1) ? "DIRS" : (g_search_filter == 2 ? "FILES" : "ALL");
+    mvprintw(1, 0, " Global Search - %zu matches (Filter: %s) ", g_search_results_count, fstr);
     attroff(COLOR_PAIR(2) | A_BOLD);
 
     int list_rows = rows - 3 - (g_decorative ? 2 : 0);
@@ -3490,7 +3528,7 @@ static void draw_search_results(int rows, int cols) {
     
     mvhline(rows-1, 0, ' ', cols);
     attron(COLOR_PAIR(2));
-    mvprintw(rows-1, 0, " [Enter] Jump to location  [ESC/q] Exit Search");
+    mvprintw(rows-1, 0, " [a]All [d]Dirs [f]Files | [Enter] Jump  [ESC/q] Exit");
     attroff(COLOR_PAIR(2));
 }
 
@@ -5323,6 +5361,10 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
                 search_results_free();
                 continue;
             }
+            if (ch == 'a') { g_search_filter = 0; apply_search_filter(); continue; }
+            if (ch == 'd') { g_search_filter = 1; apply_search_filter(); continue; }
+            if (ch == 'f') { g_search_filter = 2; apply_search_filter(); continue; }
+
             if (ch == KEY_UP || ch == 'k') {
                 if (g_search_selected > 0) {
                     g_search_selected--;
