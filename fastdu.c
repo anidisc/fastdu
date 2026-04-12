@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.71.0"
+#define FASTDU_VERSION "0.71.1"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -189,6 +189,19 @@ static void run_server(const char *root, Cache *cache) {
     fflush(stdout);
 }
 
+static char g_ssh_socket[256] = "";
+
+static void cleanup_ssh_multiplex(void) {
+    if (g_ssh_socket[0] != '\0') {
+        char cmd[512];
+        // Chiude la connessione master in modo pulito
+        snprintf(cmd, sizeof(cmd), "ssh -O exit -S %s dummy-host 2>/dev/null", g_ssh_socket);
+        system(cmd);
+        unlink(g_ssh_socket);
+        g_ssh_socket[0] = '\0';
+    }
+}
+
 static int parse_remote_uri(const char *uri, char *host, char *rpath) {
     const char *colon = strchr(uri, ':');
     if (!colon) return 0;
@@ -206,13 +219,17 @@ static char *download_remote_file(const char *abs_path) {
     char *tmp_path = "/tmp/fastdu_remote_preview.tmp";
     char cmd[PATH_MAX + 512];
     
-    draw_status("Downloading remote file...");
+    draw_status("Downloading remote file (via multiplex)...");
     refresh();
     
-    // Usiamo ssh direttamente per fare il cat nel file locale
-    snprintf(cmd, sizeof(cmd), "ssh %s \"cat '%s'\" > %s 2>/dev/null", host, rpath, tmp_path);
-    int rc = system(cmd);
+    // Usiamo il socket multiplex (-S) per una velocità istantanea senza password
+    if (g_ssh_socket[0] != '\0') {
+        snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"cat '%s'\" > %s 2>/dev/null", g_ssh_socket, host, rpath, tmp_path);
+    } else {
+        snprintf(cmd, sizeof(cmd), "ssh %s \"cat '%s'\" > %s 2>/dev/null", host, rpath, tmp_path);
+    }
     
+    int rc = system(cmd);
     if (rc != 0) {
         draw_status("Failed to download remote file.");
         return NULL;
@@ -224,17 +241,17 @@ static char *download_remote_file(const char *abs_path) {
 static void run_client_connect(const char *uri, Cache *cache, int reload_remote) {
     char host[256];
     char rpath[PATH_MAX];
-    const char *colon = strchr(uri, ':');
-    if (!colon) return;
-    
-    size_t host_len = (size_t)(colon - uri);
-    if (host_len >= sizeof(host)) host_len = sizeof(host) - 1;
-    memcpy(host, uri, host_len); host[host_len] = '\0';
-    strncpy(rpath, colon + 1, sizeof(rpath) - 1); rpath[sizeof(rpath)-1] = '\0';
-    
+    if (!parse_remote_uri(uri, host, rpath)) return;
+
+    // Prepara il socket per il multiplexing
+    snprintf(g_ssh_socket, sizeof(g_ssh_socket), "/tmp/fastdu-ssh-%u.sock", (unsigned int)getpid());
+    atexit(cleanup_ssh_multiplex);
+
     char ssh_cmd[PATH_MAX + 512];
-    snprintf(ssh_cmd, sizeof(ssh_cmd), "ssh %s \"fastdu --server %s %s\"", 
-             host, rpath, reload_remote ? "-R" : "");
+    // Avviamo la connessione master con ControlMaster=yes
+    snprintf(ssh_cmd, sizeof(ssh_cmd), 
+             "ssh -M -S %s -o ControlPersist=60 %s \"fastdu --server %s %s\"", 
+             g_ssh_socket, host, rpath, reload_remote ? "-R" : "");
     
     FILE *pipe = popen(ssh_cmd, "r");
     if (!pipe) { perror("popen ssh"); return; }
