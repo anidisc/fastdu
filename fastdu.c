@@ -138,12 +138,13 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.73.0"
+#define FASTDU_VERSION "0.73.2"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
 static int g_is_remote = 0;   // Se attivo sul client, indica che stiamo visualizzando dati remoti
 static char g_server_root[PATH_MAX] = ""; // Percorso reale sul server remoto
+Cache g_cache; // Cache globale per accesso dai thread
 
 // Forward declarations
 static void cache_init(Cache *c);
@@ -4183,8 +4184,24 @@ typedef struct MFJob {
 static void *mf_worker(void *arg) {
     MFJob *job = (MFJob*)arg;
     unsigned long long total = 0ULL;
+    extern Cache g_cache; 
+    
     for (size_t i = 0; i < job->n; i++) {
-        total += count_files_path(job->paths[i]);
+        if (g_is_remote) {
+            // Conta i file remoti filtrando la cache locale per prefisso
+            for (int k = 0; k < CACHE_SHARDS; k++) {
+                pthread_mutex_lock(&g_cache.shards[k].mu);
+                for (size_t m = 0; m < g_cache.shards[k].n; m++) {
+                    CacheEntry *e = &g_cache.shards[k].v[m];
+                    if (starts_with(e->abs_path, job->paths[i])) {
+                        if (e->ino == 0) total++; // È un file
+                    }
+                }
+                pthread_mutex_unlock(&g_cache.shards[k].mu);
+            }
+        } else {
+            total += count_files_path(job->paths[i]);
+        }
     }
     for (size_t i = 0; i < job->n; i++) free(job->paths[i]);
     free(job->paths);
@@ -4232,20 +4249,26 @@ static int is_subpath_of_any_marked(const char *p) {
 }
 
 static unsigned long long compute_marked_total_bytes(Cache *cache) {
-    // Fast path: do not traverse the filesystem here; use cache only to keep UI responsive.
-    // Unknown dirs (not in cache yet) are treated as 0 to avoid blocking.
     unsigned long long total = 0ULL;
     for (size_t i = 0; i < g_marks.n; i++) {
         const char *path = g_marks.paths[i];
         if (is_subpath_of_any_marked(path)) continue;
-        struct stat st;
-        if (lstat(path, &st) != 0) continue;
-        if (S_ISREG(st.st_mode)) {
-            total += (unsigned long long)st.st_size;
-        } else if (S_ISDIR(st.st_mode)) {
-            unsigned long long sz = 0ULL;
-            if (cache_get_info(cache, path, &sz, NULL, NULL)) total += sz;
-            // else skip (0) to avoid heavy sum_path_size traversal in render loop
+        
+        unsigned long long sz = 0ULL;
+        if (g_is_remote) {
+            // In remoto leggiamo solo dalla cache per evitare syscall/latenza
+            if (cache_get_info(cache, path, &sz, NULL, NULL)) {
+                total += sz;
+            }
+        } else {
+            struct stat st;
+            if (lstat(path, &st) == 0) {
+                if (S_ISREG(st.st_mode)) {
+                    total += (unsigned long long)st.st_size;
+                } else if (S_ISDIR(st.st_mode)) {
+                    if (cache_get_info(cache, path, &sz, NULL, NULL)) total += sz;
+                }
+            }
         }
     }
     return total;
@@ -5663,14 +5686,14 @@ int main(int argc, char **argv) {
     }
 
     // Prepare cache (load or full rescan)
-    Cache cache; cache_init(&cache);
+    cache_init(&g_cache);
     cache_init(&g_snapshot_cache);
 
     int have_cache = 0;
     char *cache_abs = NULL;
 
     if (g_is_remote) {
-        run_client_connect(root, &cache, reload_flag);
+        run_client_connect(root, &g_cache, reload_flag);
     } else {
         if (snapshot_file) {
             if (cache_load_file(snapshot_file, root, &g_snapshot_cache) > 0) {
@@ -5682,7 +5705,7 @@ int main(int argc, char **argv) {
         }
 
         if (debug_cache) fprintf(stderr, "[main] cache_load root=%s\n", root);
-        if (!reload_flag) have_cache = cache_load(root, &cache);
+        if (!reload_flag) have_cache = cache_load(root, &g_cache);
         if (debug_cache) fprintf(stderr, "[main] cache_load done have_cache=%d\n", have_cache);
         cache_abs = path_join(root, CACHE_FILENAME);
 
@@ -5691,35 +5714,35 @@ int main(int argc, char **argv) {
         if (!have_cache || reload_flag) {
             if (!headless && !g_server_mode) {
                 erase();
-                draw_header(root, root, &cache);
+                draw_header(root, root, &g_cache);
                 refresh();
             }
             if (g_accuracy_mode) {
                 // Strict single-thread recursive scan with UI progress
                 ScanUI ui = { .enabled = (g_tui_active ? 1 : 0), .count = 0, .phase = "Scanning (accurate)" };
                 clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
-                (void)scan_dir_recursive(root, root, cache_abs, &cache, &ui);
+                (void)scan_dir_recursive(root, root, cache_abs, &g_cache, &ui);
                 // Clear progress line
                 if (!headless && !g_server_mode) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
                 // Totali accurati
                 unsigned long long rs = 0ULL;
-                cache_get_info(&cache, root, &rs, NULL, NULL);
+                cache_get_info(&g_cache, root, &rs, NULL, NULL);
                 g_last_bytes = rs;
                 g_last_files = count_files_path(root);
             } else {
                 int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
                 if (threads < 1) threads = 1;
                 if (threads > 64) threads = 64;
-                (void)scan_dir_parallel_deep(root, cache_abs, &cache, threads);
+                (void)scan_dir_parallel_deep(root, cache_abs, &g_cache, threads);
                 
                 // Sync footer totals from fresh scan
                 unsigned long long rs = 0ULL;
-                if (cache_get_info(&cache, root, &rs, NULL, NULL)) {
+                if (cache_get_info(&g_cache, root, &rs, NULL, NULL)) {
                     g_last_bytes = rs;
                 }
                 g_last_files = count_files_path(root);
             }
-            cache_save(root, &cache);
+            cache_save(root, &g_cache);
             if (!headless && !g_server_mode) {
                 int cols, rows; getmaxyx(stdscr, rows, cols);
                 mvhline(rows-1, 0, ' ', cols);
@@ -5728,15 +5751,15 @@ int main(int argc, char **argv) {
         } else {
             // Cache loaded: set footer totals from cache root entry (v2/v3)
             unsigned long long rs = 0ULL;
-            cache_get_info(&cache, root, &rs, NULL, NULL);
+            cache_get_info(&g_cache, root, &rs, NULL, NULL);
             g_last_bytes = rs;
             // totals_files is already set by cache_load parsing (version 3 or row counting)
         }
     }
 
     if (g_server_mode) {
-        run_server(root, &cache);
-        cache_free(&cache);
+        run_server(root, &g_cache);
+        cache_free(&g_cache);
         cache_free(&g_snapshot_cache);
         if (cache_abs) free(cache_abs);
         return 0;
@@ -5747,10 +5770,10 @@ int main(int argc, char **argv) {
 
         if (export_format && export_file) {
             if (strcmp(export_format, "json") == 0) {
-                cache_export_json(&cache, export_file);
+                cache_export_json(&g_cache, export_file);
                 fprintf(stderr, "[export] JSON written to %s\n", export_file);
             } else if (strcmp(export_format, "csv") == 0) {
-                cache_export_csv(&cache, export_file);
+                cache_export_csv(&g_cache, export_file);
                 fprintf(stderr, "[export] CSV written to %s\n", export_file);
             } else {
                 fprintf(stderr, "Unsupported export format: %s\n", export_format);
@@ -5785,7 +5808,7 @@ int main(int argc, char **argv) {
             free(cache_abs);
             _exit(0);
         }
-        cache_free(&cache);
+        cache_free(&g_cache);
         free(cache_abs);
         exclude_free();
         if (debug_all) fprintf(stderr, "[dbg] cache_free done, exiting now\n");
@@ -5798,15 +5821,15 @@ int main(int argc, char **argv) {
     char current[PATH_MAX]; strncpy(current, root, sizeof(current)); current[sizeof(current)-1] = '\0';
 
     int top = 0;
-    build_dir_view(current, root, &cache, &dv);
-    update_miller_columns(current, root, &cache, &dv);
+    build_dir_view(current, root, &g_cache, &dv);
+    update_miller_columns(current, root, &g_cache, &dv);
 
     int ch;
     while (1) {
         if (g_global_search_mode) {
             int rows, cols; getmaxyx(stdscr, rows, cols);
             erase();
-            draw_header(root, current, &cache);
+            draw_header(root, current, &g_cache);
             draw_search_results(rows, cols);
             refresh();
 
@@ -5846,7 +5869,7 @@ int main(int argc, char **argv) {
                             // Better jump to parent and select the item.
                             strncpy(current, parent, sizeof(current)); current[sizeof(current)-1] = '\0';
                             view_free(&dv); top = 0;
-                            build_dir_view(current, root, &cache, &dv);
+                            build_dir_view(current, root, &g_cache, &dv);
                             // Select the item
                             for (size_t i = 0; i < dv.n; i++) {
                                 if (strcmp(dv.v[i].abs_path, target) == 0) {
@@ -5857,7 +5880,7 @@ int main(int argc, char **argv) {
                                     break;
                                 }
                             }
-                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                            if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                             free(parent);
                         }
                     }
@@ -5869,10 +5892,10 @@ int main(int argc, char **argv) {
         }
 
         // Handle automatic updates (if any) and trigger redraw if needed
-        (void)maybe_rescan_hovered(&dv, root, &cache);
+        (void)maybe_rescan_hovered(&dv, root, &g_cache);
 
         erase();
-        draw_header(root, current, &cache);
+        draw_header(root, current, &g_cache);
         draw_list(&dv, top);
         refresh();
 
@@ -5927,30 +5950,30 @@ int main(int argc, char **argv) {
                                         }
 
                                         if (rc == 0) {
-                                            cache_remove_prefix(&cache, ve->abs_path);
+                                            cache_remove_prefix(&g_cache, ve->abs_path);
                                             if (old_known) {
                                                 if (g_is_remote) {
                                                     // Per il remoto, simuliamo l'entry nella cache locale
                                                     // Usiamo ino=1 se era una dir, 0 se era un file
-                                                    cache_upsert_with_meta(&cache, root, new_abs, old_sz, time(NULL), ve->is_dir ? 1 : 0, ve->mtime);
+                                                    cache_upsert_with_meta(&g_cache, root, new_abs, old_sz, time(NULL), ve->is_dir ? 1 : 0, ve->mtime);
                                                 } else {
                                                     struct stat stn;
                                                     if (lstat(new_abs, &stn) == 0) {
-                                                        cache_upsert_with_meta(&cache, root, new_abs, old_sz, time(NULL), (unsigned long long)stn.st_ino, stn.st_mtime);
+                                                        cache_upsert_with_meta(&g_cache, root, new_abs, old_sz, time(NULL), (unsigned long long)stn.st_ino, stn.st_mtime);
                                                     }
                                                 }
                                             }
-                                            if (!g_is_remote) cache_save(root, &cache);
+                                            if (!g_is_remote) cache_save(root, &g_cache);
                                             
                                             view_free(&dv);
-                                            build_dir_view(current, root, &cache, &dv);
+                                            build_dir_view(current, root, &g_cache, &dv);
                                             // Find new index
                                             for(size_t i=0; i<dv.n; i++) {
                                                 if (strcmp(dv.v[i].abs_path, new_abs) == 0) {
                                                     dv.selected = i; break;
                                                 }
                                             }
-                                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                                            if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                                             draw_status("Renamed successfully.");
                                         } else {
                                             draw_status("Rename failed.");
@@ -5979,14 +6002,14 @@ int main(int argc, char **argv) {
                                     close(fd);
                                     struct stat st;
                                     if (lstat(abs, &st) == 0) {
-                                        cache_upsert_with_meta(&cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
-                                        cache_add_ancestors_after_delta(&cache, root, abs, 0);
+                                        cache_upsert_with_meta(&g_cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                                        cache_add_ancestors_after_delta(&g_cache, root, abs, 0);
                                         g_last_files++;
                                     }
                                     view_free(&dv);
-                                    build_dir_view(current, root, &cache, &dv);
+                                    build_dir_view(current, root, &g_cache, &dv);
                                     for(size_t i=0; i<dv.n; i++) { if (strcmp(dv.v[i].abs_path, abs) == 0) { dv.selected = i; break; } }
-                                    if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                                    if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                                     draw_status("File created.");
                                 } else {
                                     draw_status("Failed to create file.");
@@ -6017,12 +6040,12 @@ int main(int argc, char **argv) {
                             if (mkdir(abs, 0755) == 0) {
                                 struct stat st;
                                 if (lstat(abs, &st) == 0) {
-                                    cache_upsert_with_meta(&cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                                    cache_upsert_with_meta(&g_cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
                                 }
                                 view_free(&dv);
-                                build_dir_view(current, root, &cache, &dv);
+                                build_dir_view(current, root, &g_cache, &dv);
                                 for(size_t i=0; i<dv.n; i++) { if (strcmp(dv.v[i].abs_path, abs) == 0) { dv.selected = i; break; } }
-                                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                                if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                                 draw_status("Folder created.");
                             } else {
                                 draw_status("Failed to create folder.");
@@ -6057,18 +6080,18 @@ int main(int argc, char **argv) {
                         unsigned long long new_sz = file_size_bytes(&st);
                         if (new_sz != old_sz) {
                             long long delta = (long long)new_sz - (long long)old_sz;
-                            cache_upsert_with_meta(&cache, root, ve->abs_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
-                            if (delta > 0) cache_add_ancestors_after_delta(&cache, root, ve->abs_path, (unsigned long long)delta);
-                            else cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
+                            cache_upsert_with_meta(&g_cache, root, ve->abs_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                            if (delta > 0) cache_add_ancestors_after_delta(&g_cache, root, ve->abs_path, (unsigned long long)delta);
+                            else cache_adjust_ancestors_after_delta(&g_cache, root, ve->abs_path, (long long)(-delta));
                             if (delta >= 0) g_last_bytes += (unsigned long long)delta;
                             else {
                                 unsigned long long dec = (unsigned long long)(-delta);
                                 if (g_last_bytes > dec) g_last_bytes -= dec; else g_last_bytes = 0ULL;
                             }
-                            cache_save(root, &cache);
+                            cache_save(root, &g_cache);
                             view_free(&dv);
-                            build_dir_view(current, root, &cache, &dv);
-                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                            build_dir_view(current, root, &g_cache, &dv);
+                            if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                             draw_status("File updated.");
                         }
                     }
@@ -6104,7 +6127,7 @@ int main(int argc, char **argv) {
                             }
                             
                             draw_status("Extracting archive..."); refresh();
-                            if (archive_extract_to(ve->abs_path, target_dir, root, &cache) == 0) {
+                            if (archive_extract_to(ve->abs_path, target_dir, root, &g_cache) == 0) {
                                 draw_status("Extraction complete.");
                             } else {
                                 draw_status("Extraction failed.");
@@ -6112,7 +6135,7 @@ int main(int argc, char **argv) {
                             
                             // Rebuild view and find the new item index
                             view_free(&dv);
-                            build_dir_view(current, root, &cache, &dv);
+                            build_dir_view(current, root, &g_cache, &dv);
                             size_t new_idx = 0; int found = 0;
                             for (size_t i = 0; i < dv.n; i++) {
                                 if (strcmp(dv.v[i].abs_path, target_dir) == 0) {
@@ -6126,7 +6149,7 @@ int main(int argc, char **argv) {
                                 if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                                 if ((int)dv.selected < top) top = (int)dv.selected;
                             }
-                            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                            if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                             free(target_dir);
                         }
                     }
@@ -6192,7 +6215,7 @@ int main(int argc, char **argv) {
                                 
                                 // Rebuild view and find the new zip file index
                                 view_free(&dv);
-                                build_dir_view(current, root, &cache, &dv);
+                                build_dir_view(current, root, &g_cache, &dv);
                                 size_t new_idx = 0;
                                 int found = 0;
                                 for (size_t i = 0; i < dv.n; i++) {
@@ -6207,12 +6230,12 @@ int main(int argc, char **argv) {
                                     if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
                                     if ((int)dv.selected < top) top = (int)dv.selected;
                                 }
-                                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                                if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                             } else {
                                 draw_status("Compression cancelled or failed.");
                                 view_free(&dv);
-                                build_dir_view(current, root, &cache, &dv);
-                                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                                build_dir_view(current, root, &g_cache, &dv);
+                                if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                             }
                         }
                         free(dest_path);
@@ -6228,8 +6251,8 @@ int main(int argc, char **argv) {
                 launch_subshell(current);
                 // Rescan current dir in case user modified anything
                 view_free(&dv);
-                build_dir_view(current, root, &cache, &dv);
-                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                build_dir_view(current, root, &g_cache, &dv);
+                if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
             }
         } else if (ch == 20) { // Ctrl-T: reset all filters
             g_filter_mode = FILTER_ALL;
@@ -6238,8 +6261,8 @@ int main(int argc, char **argv) {
             if (g_regex_enabled) { regfree(&g_regex); g_regex_enabled = 0; }
             view_free(&dv);
             top = 0;
-            build_dir_view(current, root, &cache, &dv);
-            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+            build_dir_view(current, root, &g_cache, &dv);
+            if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
             draw_status("Filters reset to ALL");
         } else if (ch == 'a' || ch == 'A') {
             if (g_miller_mode) {
@@ -6248,14 +6271,14 @@ int main(int argc, char **argv) {
                 g_tree_mode = !g_tree_mode;
                 view_free(&dv);
                 top = 0;
-                build_dir_view(current, root, &cache, &dv);
+                build_dir_view(current, root, &g_cache, &dv);
             }
         } else if (ch == 'M') {
             if (g_tree_mode) {
                 draw_status("Miller Columns are not compatible with Tree View.");
             } else {
                 g_miller_mode = !g_miller_mode;
-                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
             }
         } else if (ch == KEY_MOUSE) {
             MEVENT event;
@@ -6273,7 +6296,7 @@ int main(int argc, char **argv) {
                                     current[sizeof(current)-1] = '\0';
                                     view_free(&dv);
                                     top = 0;
-                                    build_dir_view(current, root, &cache, &dv);
+                                    build_dir_view(current, root, &g_cache, &dv);
                                 }
                                 break;
                             }
@@ -6288,7 +6311,7 @@ int main(int argc, char **argv) {
                                     strncpy(current, ve->abs_path, sizeof(current)); current[sizeof(current)-1] = '\0';
                                     view_free(&dv);
                                     top = 0;
-                                    build_dir_view(current, root, &cache, &dv);
+                                    build_dir_view(current, root, &g_cache, &dv);
                                 }
                             } else {
                                 dv.selected = clicked_idx;
@@ -6314,19 +6337,19 @@ int main(int argc, char **argv) {
             show_help();
         } else if (ch == 'M') {
             g_miller_mode = !g_miller_mode;
-            if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+            if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
         } else if (ch == KEY_UP || ch == 'k') {
             if (dv.selected > 0) {
                 dv.selected--;
                 g_preview_scroll_y = 0; g_preview_scroll_x = 0;
-                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
             }
             if ((int)dv.selected < top) top = (int)dv.selected;
         } else if (ch == KEY_DOWN || ch == 'j') {
             if (dv.selected + 1 < dv.n) {
                 dv.selected++;
                 g_preview_scroll_y = 0; g_preview_scroll_x = 0;
-                if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
             }
             int rows, cols; getmaxyx(stdscr, rows, cols);
 
@@ -6345,7 +6368,7 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                             g_archive_subpath = xstrdup(ve->name);
                         }
                         view_free(&dv); top = 0;
-                        build_dir_view(NULL, root, &cache, &dv);
+                        build_dir_view(NULL, root, &g_cache, &dv);
                     }
                 } else if (ve->is_dir) {
                     if (g_tree_mode) {
@@ -6353,7 +6376,7 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         else expanded_add(ve->abs_path);
                         size_t sel = dv.selected; int old_top = top;
                         view_free(&dv);
-                        build_dir_view(current, root, &cache, &dv);
+                        build_dir_view(current, root, &g_cache, &dv);
                         dv.selected = sel; top = old_top;
                     } else {
                         // Push parent nav state before changing directory
@@ -6361,8 +6384,8 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                         strncpy(current, ve->abs_path, sizeof(current)); current[sizeof(current)-1] = '\0';
                         view_free(&dv);
                         top = 0;
-                        build_dir_view(current, root, &cache, &dv);
-                        if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                        build_dir_view(current, root, &g_cache, &dv);
+                        if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                     }
                 } else if (g_miller_mode && !ve->is_dir && (ch == KEY_RIGHT || ch == 'l')) {
                     if (is_textual_file(ve->abs_path)) {
@@ -6381,7 +6404,7 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                     g_inside_archive_path = xstrdup(ve->abs_path);
                     g_archive_subpath = NULL;
                     view_free(&dv); top = 0;
-                    build_dir_view(NULL, root, &cache, &dv);
+                    build_dir_view(NULL, root, &g_cache, &dv);
                 }
             }
         } else if (ch == 'b' || ch == 'B') {
@@ -6407,7 +6430,7 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                     else g_archive_subpath = p;
                 }
                 view_free(&dv);
-                build_dir_view(current, root, &cache, &dv);
+                build_dir_view(current, root, &g_cache, &dv);
                 // Restore selection/top from nav stack
                 NavState st;
                 if (navstack_pop(&nav, &st)) {
@@ -6429,8 +6452,8 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                     strncpy(current, parent, sizeof(current)); current[sizeof(current)-1] = '\0';
                     free(parent);
                     view_free(&dv);
-                    build_dir_view(current, root, &cache, &dv);
-                    if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                    build_dir_view(current, root, &g_cache, &dv);
+                    if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                     // Restore selection/top from nav stack
                     NavState st;
                     if (navstack_pop(&nav, &st)) {
@@ -6456,7 +6479,7 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                 char *sel_path = xstrdup(ve->abs_path);
                 if (ve->is_dir) {
                     // compute old size and preserve current global total
-                    unsigned long long old_sz = 0ULL; cache_get_info(&cache, ve->abs_path, &old_sz, NULL, NULL);
+                    unsigned long long old_sz = 0ULL; cache_get_info(&g_cache, ve->abs_path, &old_sz, NULL, NULL);
                     unsigned long long old_files = count_files_path(ve->abs_path);
                     unsigned long long prev_global_bytes = g_last_bytes;
                     unsigned long long prev_global_files = g_last_files;
@@ -6468,12 +6491,12 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                         if (threads < 1) threads = 1;
                         if (threads > 64) threads = 64;
                         // Execute scan (updates subdirectories in cache)
-                        unsigned long long new_sz = scan_dir_parallel_deep(scan_path, cache_abs, &cache, threads);
+                        unsigned long long new_sz = scan_dir_parallel_deep(scan_path, cache_abs, &g_cache, threads);
                         
                         // Explicitly update the scanned directory metadata in cache
                         struct stat st;
                         if (lstat(scan_path, &st) == 0) {
-                            cache_upsert_with_meta(&cache, root, scan_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                            cache_upsert_with_meta(&g_cache, root, scan_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
                         }
 
                         // Compute deltas
@@ -6486,11 +6509,11 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                         g_last_files = (unsigned long long)((long long)prev_global_files + delta_fl);
 
                         // Propagate delta to ancestors in cache
-                        if (delta_sz > 0) cache_add_ancestors_after_delta(&cache, root, scan_path, (unsigned long long)delta_sz);
-                        else if (delta_sz < 0) cache_adjust_ancestors_after_delta(&cache, root, scan_path, (long long)(-delta_sz));
+                        if (delta_sz > 0) cache_add_ancestors_after_delta(&g_cache, root, scan_path, (unsigned long long)delta_sz);
+                        else if (delta_sz < 0) cache_adjust_ancestors_after_delta(&g_cache, root, scan_path, (long long)(-delta_sz));
 
                         // Persist to disk immediately
-                        cache_save(root, &cache);
+                        cache_save(root, &g_cache);
                         free(scan_path);
                     }
                 } else {
@@ -6501,18 +6524,18 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                         unsigned long long new_sz = file_size_bytes(&st);
                         long long delta = (long long)new_sz - (long long)old_sz;
                         if (delta != 0) {
-                            cache_upsert_with_meta(&cache, root, ve->abs_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
-                            if (delta > 0) cache_add_ancestors_after_delta(&cache, root, ve->abs_path, (unsigned long long)delta);
-                            else cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
+                            cache_upsert_with_meta(&g_cache, root, ve->abs_path, new_sz, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                            if (delta > 0) cache_add_ancestors_after_delta(&g_cache, root, ve->abs_path, (unsigned long long)delta);
+                            else cache_adjust_ancestors_after_delta(&g_cache, root, ve->abs_path, (long long)(-delta));
                             g_last_bytes = (unsigned long long)((long long)g_last_bytes + delta);
                         }
-                        cache_save(root, &cache);
+                        cache_save(root, &g_cache);
                     }
                 }
                 // rebuild and reselect same path
                 size_t old_selected = dv.selected;
                 view_free(&dv);
-                build_dir_view(current, root, &cache, &dv);
+                build_dir_view(current, root, &g_cache, &dv);
                 // find index of sel_path
                 size_t new_idx = 0; int found = 0;
                 if (sel_path) {
@@ -6533,18 +6556,18 @@ int rows, cols; getmaxyx(stdscr, rows, cols);
                 int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
                 if (threads < 1) threads = 1;
                 if (threads > 64) threads = 64;
-                (void)scan_dir_parallel_deep(scan_path, cache_abs, &cache, threads);
+                (void)scan_dir_parallel_deep(scan_path, cache_abs, &g_cache, threads);
                 free(scan_path);
                 
                 // Update global totals if we scanned from root or adjust current state
                 unsigned long long new_root_sz = 0ULL;
-                if (cache_get_info(&cache, root, &new_root_sz, NULL, NULL)) {
+                if (cache_get_info(&g_cache, root, &new_root_sz, NULL, NULL)) {
                     g_last_bytes = new_root_sz;
                 }
-                cache_save(root, &cache);
+                cache_save(root, &g_cache);
             }
             view_free(&dv);
-            build_dir_view(current, root, &cache, &dv);
+            build_dir_view(current, root, &g_cache, &dv);
         } else if (ch == ' ') {
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
@@ -6576,7 +6599,7 @@ draw_status("Selected all in view");
             char q[256] = "";
             int got = prompt_input(q, sizeof(q), "Global Search (entire cache): ");
             if (got > 0) {
-                perform_global_search(&cache, q);
+                perform_global_search(&g_cache, q);
                 if (g_search_results_count > 0) {
                     g_global_search_mode = 1;
                 } else {
@@ -6613,7 +6636,7 @@ draw_status("Selected all in view");
             if (got == 0) {
                 g_regex_enabled = 0;
                 g_filter_by_query = 0;
-                view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                view_free(&dv); build_dir_view(current, root, &g_cache, &dv);
                 draw_status("Regex filter disabled");
             } else if (got > 0) {
                 regex_t re;
@@ -6623,8 +6646,8 @@ draw_status("Selected all in view");
                     if (g_regex_enabled) regfree(&g_regex);
                     g_regex = re; g_regex_enabled = 1;
                     g_filter_by_query = 1;
-                    view_free(&dv); build_dir_view(current, root, &cache, &dv);
-                    if (g_miller_mode) update_miller_columns(current, root, &cache, &dv);
+                    view_free(&dv); build_dir_view(current, root, &g_cache, &dv);
+                    if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
                 }
             }
         } else if (ch == 'n') {
@@ -6687,10 +6710,10 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             if (g_inside_archive_path) {
                 draw_status("Duplicate finder is not supported inside archives.");
             } else {
-                show_duplicates_view(current, &cache, cache_abs);
+                show_duplicates_view(current, &g_cache, cache_abs);
                 // rebuild view in case duplicates were deleted
                 view_free(&dv);
-                build_dir_view(current, root, &cache, &dv);
+                build_dir_view(current, root, &g_cache, &dv);
             }
         } else if (ch == 'O' || ch == 15) { // Shift+O or Ctrl+O
             if (dv.n > 0) {
@@ -6714,7 +6737,7 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 char *sel_path = xstrdup(dv.v[dv.selected].abs_path);
                 g_sort_mode = next_mode;
                 view_free(&dv);
-                build_dir_view(current, root, &cache, &dv);
+                build_dir_view(current, root, &g_cache, &dv);
                 size_t new_idx = 0; int found = 0;
                 for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
                 if (found) dv.selected = new_idx;
@@ -6741,20 +6764,20 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 cache_free(&g_snapshot_cache);
                 draw_status("Diff mode DISABLED");
             } else {
-                cache_copy(&g_snapshot_cache, &cache);
+                cache_copy(&g_snapshot_cache, &g_cache);
                 g_diff_mode = 1;
                 draw_status("Snapshot taken! Diff mode ENABLED relative to this moment.");
             }
             // rebuild view to update deltas
             view_free(&dv);
-            build_dir_view(current, root, &cache, &dv);
+            build_dir_view(current, root, &g_cache, &dv);
         } else if (ch == 't') {
             // toggle filter: all -> dirs -> files -> all (lowercase t)
             if (dv.n > 0) {
                 char *sel_path = xstrdup(dv.v[dv.selected].abs_path);
                 g_filter_mode = (g_filter_mode == FILTER_ALL) ? FILTER_DIRS : (g_filter_mode == FILTER_DIRS ? FILTER_FILES : FILTER_ALL);
                 view_free(&dv);
-                build_dir_view(current, root, &cache, &dv);
+                build_dir_view(current, root, &g_cache, &dv);
                 size_t new_idx = 0; int found = 0;
                 for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
                 if (found) dv.selected = new_idx; else dv.selected = 0;
@@ -6777,11 +6800,11 @@ draw_status("No search query stored");
                     char *sel_path = (dv.n > 0) ? xstrdup(dv.v[dv.selected].abs_path) : NULL;
                     g_filter_by_query = 1;
                     view_free(&dv);
-                    build_dir_view(current, root, &cache, &dv);
+                    build_dir_view(current, root, &g_cache, &dv);
                     if (dv.n == 0) {
                         // nothing matches: revert
                         g_filter_by_query = 0;
-                        build_dir_view(current, root, &cache, &dv);
+                        build_dir_view(current, root, &g_cache, &dv);
 draw_status("No elements match the query");
                     } else if (sel_path) {
                         size_t new_idx = 0; int found = 0;
@@ -6797,7 +6820,7 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                 } else {
                     g_filter_by_query = 0;
                     view_free(&dv);
-                    build_dir_view(current, root, &cache, &dv);
+                    build_dir_view(current, root, &g_cache, &dv);
                     // adjust top
                     int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3;
                     if ((int)dv.selected >= top + list_rows) top = (int)dv.selected - list_rows + 1;
@@ -6811,7 +6834,7 @@ int rows, cols; getmaxyx(stdscr, rows, cols); int list_rows = rows - 3 - (g_deco
                 char *sel_path = xstrdup(dv.v[dv.selected].abs_path);
                 g_sort_desc = !g_sort_desc;
                 view_free(&dv);
-                build_dir_view(current, root, &cache, &dv);
+                build_dir_view(current, root, &g_cache, &dv);
                 size_t new_idx = 0; int found = 0;
                 for (size_t i = 0; i < dv.n; i++) { if (strcmp(dv.v[i].abs_path, sel_path) == 0) { new_idx = i; found = 1; break; } }
                 if (found) dv.selected = new_idx;
@@ -6843,7 +6866,7 @@ draw_status("No items marked.");
                         if (!dst) continue;
                         // compute delta
                         unsigned long long delta=0ULL; struct stat st; int is_dir=0;
-                        if (lstat(src,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; if(!cache_get_info(&cache,src,&delta,NULL,NULL)) delta=scan_dir_recursive(src, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
+                        if (lstat(src,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; if(!cache_get_info(&g_cache,src,&delta,NULL,NULL)) delta=scan_dir_recursive(src, root, cache_abs, &g_cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
                         // handle conflict
                         if (path_exists(dst)) {
                             char act = conflict_all_m ? conflict_action_all_m : prompt_conflict_action(dst);
@@ -6854,9 +6877,9 @@ draw_status("No items marked.");
                         }
                         // perform rename (move)
                         if (rename(src, dst)==0){
-                            if (is_dir) cache_move_prefix(&cache, root, src, dst);
-                            cache_adjust_ancestors_after_delta(&cache, root, src, (long long)delta);
-                            cache_add_ancestors_after_delta(&cache, root, dst, delta);
+                            if (is_dir) cache_move_prefix(&g_cache, root, src, dst);
+                            cache_adjust_ancestors_after_delta(&g_cache, root, src, (long long)delta);
+                            cache_add_ancestors_after_delta(&g_cache, root, dst, delta);
                             markset_remove_prefix(&g_marks, src);
                         } else {
                             // if rename failed, check EXDEV fallback: copy+unlink
@@ -6871,15 +6894,15 @@ draw_status("No items marked.");
                                 if (rc2 == 0) {
                                     // remove source and update cache
                                     remove_tree(src, cache_abs);
-                                    if (is_dir) cache_remove_prefix(&cache, src);
-                                    cache_adjust_ancestors_after_delta(&cache, root, src, (long long)delta);
-                                    cache_add_ancestors_after_delta(&cache, root, dst, delta);
+                                    if (is_dir) cache_remove_prefix(&g_cache, src);
+                                    cache_adjust_ancestors_after_delta(&g_cache, root, src, (long long)delta);
+                                    cache_add_ancestors_after_delta(&g_cache, root, dst, delta);
                                 }
                             }
                         }
                         free(dst);
                     }
-                    cache_save(root,&cache);
+                    cache_save(root,&g_cache);
                     // clear all marks after move to avoid unintended operations
                     markset_clear(&g_marks);
                     if (list) {
@@ -6890,7 +6913,7 @@ draw_status("No items marked.");
                     }
                     // Refresh view and restore selection
                     size_t old_index = dv.selected;
-                    view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                    view_free(&dv); build_dir_view(current, root, &g_cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
                     draw_status("Move completed.");
                 } else {
@@ -6940,18 +6963,18 @@ draw_status("No items marked.");
                             (void)copy_tree_with_progress(src, dst, &ui, root);
                             // update cache for new dir
                             char *cache_abs = path_join(root, CACHE_FILENAME);
-                            (void)scan_dir_recursive(dst, root, cache_abs, &cache, NULL);
+                            (void)scan_dir_recursive(dst, root, cache_abs, &g_cache, NULL);
                             free(cache_abs);
                             // add delta to ancestors using estimated (or recompute size via cache)
                             unsigned long long dsz = 0ULL;
-                            if (!cache_get_info(&cache, dst, &dsz, NULL, NULL)) dsz = sum_path_size(dst);
-                            cache_add_ancestors_after_delta(&cache, root, dst, dsz);
+                            if (!cache_get_info(&g_cache, dst, &dsz, NULL, NULL)) dsz = sum_path_size(dst);
+                            cache_add_ancestors_after_delta(&g_cache, root, dst, dsz);
                             // increment global files by files copied under dst
                             unsigned long long finc = count_files_path(dst);
                             g_last_files += finc;
                         } else if (S_ISREG(st.st_mode)) {
                             (void)copy_file_with_progress(src, dst, &ui);
-                            cache_add_ancestors_after_delta(&cache, root, dst, (unsigned long long)st.st_size);
+                            cache_add_ancestors_after_delta(&g_cache, root, dst, (unsigned long long)st.st_size);
                             // increment global files by one regular file
                             g_last_files += 1ULL;
                         }
@@ -6959,7 +6982,7 @@ draw_status("No items marked.");
                     }
                     // clear progress line
                     int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh();
-                    cache_save(root, &cache);
+                    cache_save(root, &g_cache);
                     // clear all marks after copy to avoid unintended operations
                     markset_clear(&g_marks);
                     if (list) {
@@ -6970,7 +6993,7 @@ draw_status("No items marked.");
                     }
                     // Refresh view and restore selection
                     size_t old_index = dv.selected;
-                    view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                    view_free(&dv); build_dir_view(current, root, &g_cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
                     draw_status("Copy completed.");
                 } else {
@@ -6996,29 +7019,47 @@ draw_status("No items marked.");
                     if (max_i!=i){ char*tmp=list[i]; list[i]=list[max_i]; list[max_i]=tmp; }
                 }
                 // Confirm
-                size_t cnt_dir=0,cnt_file=0; for(size_t i=0;i<n;i++){ struct stat st; if (lstat(list[i],&st)==0){ if(S_ISDIR(st.st_mode)) cnt_dir++; else cnt_file++; }}
+                size_t cnt_dir=0,cnt_file=0; 
+                for(size_t i=0;i<n;i++){ 
+                    if (g_is_remote) {
+                        // In remoto cerchiamo nella cache
+                        unsigned long long dummy; time_t dummy_t; unsigned long long ino = 0;
+                        if (cache_get_info(&g_cache, list[i], &dummy, &dummy_t, &ino)) {
+                            if (ino > 0) cnt_dir++; else cnt_file++;
+                        }
+                    } else {
+                        struct stat st; 
+                        if (lstat(list[i],&st)==0){ if(S_ISDIR(st.st_mode)) cnt_dir++; else cnt_file++; }
+                    }
+                }
                 char prompt[256]; snprintf(prompt,sizeof(prompt),"Delete %zu elements (%zu dir, %zu file)? [y/N] ", n, cnt_dir, cnt_file);
                 draw_status(prompt); refresh(); int chc=getch();
                 if (chc=='y'||chc=='Y'){
-                    for (size_t i=0;i<n;i++){
+                    for (size_t i=0; i < n; i++){
                         const char *p = list[i];
                         unsigned long long delta=0ULL;
-                        int is_dir=0;
+                        unsigned long long files_dec = 1;
+                        unsigned long long ino = 0;
                         
-                        // Cerchiamo info nella cache locale prima di eliminare
-                        if (!cache_get_info(&cache, p, &delta, NULL, NULL)) delta = 0;
-                        // Nota: qui potremmo migliorare il rilevamento is_dir per il remoto
-                        // Per ora usiamo una ricerca veloce nella cache
-                        for (int k=0; k<CACHE_SHARDS; k++) {
-                            pthread_mutex_lock(&cache.shards[k].mu);
-                            for (size_t m=0; m<cache.shards[k].n; m++) {
-                                if (strcmp(cache.shards[k].v[m].abs_path, p) == 0) {
-                                    is_dir = (cache.shards[k].v[m].ino > 0);
-                                    break;
+                        // Mostriamo progresso
+                        char status_msg[PATH_MAX + 64];
+                        snprintf(status_msg, sizeof(status_msg), "Deleting [%zu/%zu]: %s", i+1, n, path_basename_const(p));
+                        draw_status(status_msg); refresh();
+
+                        if (cache_get_info(&g_cache, p, &delta, NULL, &ino)) {
+                            if (ino > 0) { // È una directory
+                                // Contiamo i file sotto di essa nella cache per g_last_files
+                                files_dec = 0;
+                                for (int k=0; k<CACHE_SHARDS; k++) {
+                                    pthread_mutex_lock(&g_cache.shards[k].mu);
+                                    for (size_t m=0; m<g_cache.shards[k].n; m++) {
+                                        if (starts_with(g_cache.shards[k].v[m].abs_path, p)) {
+                                            if (g_cache.shards[k].v[m].ino == 0) files_dec++;
+                                        }
+                                    }
+                                    pthread_mutex_unlock(&g_cache.shards[k].mu);
                                 }
                             }
-                            pthread_mutex_unlock(&cache.shards[k].mu);
-                            if (is_dir) break;
                         }
 
                         int rc = -1;
@@ -7029,13 +7070,18 @@ draw_status("No items marked.");
                         }
 
                         if (rc == 0) {
-                            if (is_dir) cache_remove_prefix(&cache, p);
-                            cache_adjust_ancestors_after_delta(&cache, root, p, (long long)(-delta));
+                            cache_remove_prefix(&g_cache, p);
+                            cache_adjust_ancestors_after_delta(&g_cache, root, p, (long long)(-delta));
                             if (g_last_bytes > delta) g_last_bytes -= delta; else g_last_bytes = 0ULL;
-                            if (g_last_files > 0) g_last_files--; // Decremento semplice
+                            if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL; 
+                        } else {
+                            char err_msg[PATH_MAX + 64];
+                            snprintf(err_msg, sizeof(err_msg), "Failed to delete: %s", path_basename_const(p));
+                            draw_status(err_msg); refresh();
+                            napms(500); // Lasciamo leggere l'errore
                         }
                     }
-                    if (!g_is_remote) cache_save(root, &cache);
+                    if (!g_is_remote) cache_save(root, &g_cache);
                     // clear marks that were deleted
                     if (list) {
                         for(size_t i=0;i<n;i++) {
@@ -7046,7 +7092,7 @@ draw_status("No items marked.");
                     }
                     // refresh view and restore selection
                     size_t old_index = dv.selected;
-                    view_free(&dv); build_dir_view(current, root, &cache, &dv);
+                    view_free(&dv); build_dir_view(current, root, &g_cache, &dv);
                     if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
                     draw_status("Delete completed.");
                 } else {
@@ -7072,13 +7118,13 @@ draw_status("No items marked.");
                     if (rc == 0) {
                         size_t old_index = dv.selected;
                         // Rimuoviamo SEMPRE l'elemento dalla cache (sia file che dir)
-                        cache_remove_prefix(&cache, ve->abs_path);
+                        cache_remove_prefix(&g_cache, ve->abs_path);
                         
-                        cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
+                        cache_adjust_ancestors_after_delta(&g_cache, root, ve->abs_path, (long long)(-delta));
                         if (g_last_bytes > delta) g_last_bytes -= delta; else g_last_bytes = 0ULL;
                         if (!g_is_remote) {
                             if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL;
-                            cache_save(root, &cache);
+                            cache_save(root, &g_cache);
                         } else {
                             // Per il remoto, decrementiamo solo di 1 per semplicità se non conosciamo figli
                             if (g_last_files > 0) g_last_files--;
@@ -7086,7 +7132,7 @@ draw_status("No items marked.");
                         
                         markset_remove_prefix(&g_marks, ve->abs_path);
                         view_free(&dv);
-                        build_dir_view(current, root, &cache, &dv);
+                        build_dir_view(current, root, &g_cache, &dv);
                         if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
                         draw_status("Erase completed.");
                     } else {
@@ -7103,14 +7149,14 @@ draw_status("No items marked.");
     
     // FINAL DUMP: Overwrite cache file with current memory state
     if (!g_is_remote) {
-        if (cache_save(root, &cache) == 0) {
+        if (cache_save(root, &g_cache) == 0) {
             if (debug_all) fprintf(stderr, "[cleanup] Cache saved successfully to %s\n", root);
         } else {
             fprintf(stderr, "[cleanup] Error saving cache to %s\n", root);
         }
     }
 
-    cache_free(&cache);
+    cache_free(&g_cache);
     if (g_diff_mode) cache_free(&g_snapshot_cache);
     if (g_regex_enabled) { regfree(&g_regex); g_regex_enabled = 0; }
     free(cache_abs);

@@ -38,7 +38,8 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
 
-### 10. Funzionalità Remote (Client/Server) - v0.73.0
+### 10. Funzionalità Remote (Client/Server) - v0.73.2
+- [x] **Marcatura e Operazioni Bulk:** Supporto completo per la marcatura di file/directory remoti con calcolo corretto di dimensioni e conteggi nella UI.
 - [x] **Rinomina Remota (ALT+r):** Implementata la possibilità di rinominare file e cartelle remoti con aggiornamento atomico della cache sul server e sincronizzazione locale.
 - [x] **Cancellazione Remota ('d'):** Implementata la delega del comando di cancellazione al server con aggiornamento sincronizzato di entrambe le cache (locale e remota).
 - [x] **SSH Multiplexing (ControlMaster):** Riutilizzo della connessione master per rendere istantanee le anteprime e le operazioni senza chiedere ripetutamente la password.
