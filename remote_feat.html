@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>fastdu - Funzionalità Remote (Client/Server)</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; background: #f4f4f9; }
+        h1, h2 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        code { background: #e8e8e8; padding: 2px 5px; border-radius: 4px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace; }
+        pre { background: #2d2d2d; color: #f8f8f2; padding: 15px; border-radius: 8px; overflow-x: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .note { background: #d1ecf1; border-left: 5px solid #0c5460; padding: 15px; margin: 20px 0; border-radius: 0 4px 4px 0; }
+        .warning { background: #fff3cd; border-left: 5px solid #856404; padding: 15px; margin: 20px 0; border-radius: 0 4px 4px 0; }
+        .feature-box { background: white; border: 1px solid #ddd; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <h1>🌐 Funzionalità Remote in fastdu</h1>
+    <p>A partire dalla versione 0.70.0, <code>fastdu</code> introduce un'architettura Client/Server per la gestione ultra-rapida di filesystem remoti tramite SSH.</p>
+
+    <div class="note">
+        <strong>Architettura:</strong> Invece di scansionare file per file tramite la rete (lento), <code>fastdu</code> locale avvia un'istanza di se stesso sul server remoto. Il server scansiona i dischi alla velocità locale e invia uno stream compresso di dati al client.
+    </div>
+
+    <h2>1. Modalità Server</h2>
+    <div class="feature-box">
+        <p>Il server viene attivato con il flag <code>--server</code>. Non necessita di configurazione o porte aperte, poiché comunica tramite <code>stdin/stdout</code>.</p>
+        <pre># Esempio di avvio manuale (raramente necessario)
+fastdu --server /home/utente/dati</pre>
+    </div>
+
+    <h2>2. Connessione dal Client</h2>
+    <div class="feature-box">
+        <p>Per connettersi a un server remoto, utilizzare il flag <code>--connect</code> (o <code>-c</code>) seguito dall'URI in stile SSH:</p>
+        <pre>fastdu --connect utente@server-remoto:/var/www/html</pre>
+        <p><strong>Cosa succede dietro le quinte:</strong></p>
+        <ol>
+            <li>Il client locale apre un tunnel SSH.</li>
+            <li>Esegue <code>fastdu --server /var/www/html</code> sul remoto.</li>
+            <li>Riceve la struttura della cache compressa in tempo reale.</li>
+        </ol>
+    </div>
+
+    <h2>3. Operazioni Supportate</h2>
+    <ul>
+        <li><strong>Navigazione Istantanea:</strong> Grazie allo streaming della cache, la navigazione tra le cartelle è veloce quanto quella locale.</li>
+        <li><strong>Cancellazione Remota:</strong> Premendo <code>d</code>, il comando viene inviato al server ed eseguito localmente sul filesystem remoto.</li>
+        <li><strong>Rinomina:</strong> Supportata nativamente con aggiornamento immediato della vista.</li>
+        <li><strong>Ricerca Globale:</strong> È possibile cercare file su tutto il server remoto in frazioni di secondo.</li>
+    </ul>
+
+    <div class="warning">
+        <strong>Requisiti:</strong> Il binario <code>fastdu</code> deve essere presente nel PATH del server remoto o deve essere specificato il percorso completo nelle impostazioni.
+    </div>
+
+    <footer>
+        <hr>
+        <p>&copy; 2026 fastdu Project - Documentazione Sviluppo Remote</p>
+    </footer>
+</body>
+</html>

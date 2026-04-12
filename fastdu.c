@@ -76,7 +76,8 @@
 
 // Forward declaration for TUI active flag used before its definition
 static volatile sig_atomic_t g_tui_active;
-static volatile sig_atomic_t g_interrupted = 0;
+static int g_interrupted = 0;
+static int g_headless = 0;
 
 // ------------------------------
 // Types and Structures (Early definitions)
@@ -103,6 +104,9 @@ typedef struct {
 typedef struct {
     CacheShard shards[CACHE_SHARDS];
 } Cache;
+
+// Forward declarations
+static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_path, unsigned long long size, time_t scan_time, unsigned long long ino, time_t mtime);
 
 typedef struct {
     char *name;
@@ -134,6 +138,7 @@ static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
 static void cache_add_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, unsigned long long delta);
+static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_path, unsigned long long size, time_t scan_time, unsigned long long ino, time_t mtime);
 static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
@@ -197,6 +202,74 @@ static void run_server(const char *root, Cache *cache) {
     // For now, we just exit after the dump to test the transport.
 }
 
+static void run_client_connect(const char *uri, Cache *cache) {
+    // Expected format: [user@]host:path
+    char host[256];
+    char rpath[PATH_MAX];
+    const char *colon = strchr(uri, ':');
+    if (!colon) {
+        fprintf(stderr, "Error: Invalid remote URI. Use [user@]host:path\n");
+        return;
+    }
+    
+    size_t host_len = (size_t)(colon - uri);
+    if (host_len >= sizeof(host)) host_len = sizeof(host) - 1;
+    memcpy(host, uri, host_len);
+    host[host_len] = '\0';
+    strncpy(rpath, colon + 1, sizeof(rpath) - 1);
+    rpath[sizeof(rpath)-1] = '\0';
+    
+    char ssh_cmd[PATH_MAX + 512];
+    // We assume 'fastdu' is in the remote PATH
+    snprintf(ssh_cmd, sizeof(ssh_cmd), "ssh %s \"fastdu --server %s\"", host, rpath);
+    
+    if (g_headless) fprintf(stderr, "[client] connecting to %s via SSH...\n", host);
+    
+    FILE *pipe = popen(ssh_cmd, "r");
+    if (!pipe) {
+        perror("popen ssh");
+        return;
+    }
+    
+    size_t count = 0;
+    while (!feof(pipe)) {
+        uint8_t type;
+        if (fread(&type, 1, 1, pipe) != 1) break;
+        
+        if (type == R_MSG_ENTRY) {
+            uint32_t abs_len;
+            if (fread(&abs_len, 4, 1, pipe) != 1) break;
+            char *abs_path = malloc(abs_len + 1);
+            if (!abs_path) break;
+            if (fread(abs_path, 1, abs_len, pipe) != abs_len) { free(abs_path); break; }
+            abs_path[abs_len] = '\0';
+            
+            unsigned long long sz;
+            unsigned long long ino;
+            time_t mtime;
+            if (fread(&sz, 8, 1, pipe) != 1) { free(abs_path); break; }
+            if (fread(&ino, 8, 1, pipe) != 1) { free(abs_path); break; }
+            if (fread(&mtime, 8, 1, pipe) != 1) { free(abs_path); break; }
+            
+            cache_upsert_with_meta(cache, uri, abs_path, sz, time(NULL), ino, mtime);
+            free(abs_path);
+            count++;
+            
+            if (count % 1000 == 0 && g_headless) {
+                fprintf(stderr, "\r[client] Received %zu entries...", count);
+                fflush(stderr);
+            }
+        } else if (type == R_MSG_DONE) {
+            if (g_headless) fprintf(stderr, "\n[client] Scan complete. %zu entries received.\n", count);
+            break;
+        } else if (type == R_MSG_ERROR) {
+            fprintf(stderr, "\n[client] Server reported an error.\n");
+            break;
+        }
+    }
+    pclose(pipe);
+}
+
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
     printf("Usage:\n");
@@ -209,6 +282,7 @@ static void print_cli_usage(void) {
     printf("  -ac, --accuracy      Accurate disk usage: force deep rescan and use allocated blocks (slower)\n");
     printf("  -x, --one-file-system Stay on the same file system (do not cross mount points)\n");
     printf("  --server [path]      Start in server mode (SSH backend communication)\n");
+    printf("  --connect [user@]host:path  Connect to a remote fastdu server via SSH\n");
     printf("  -e PAT, --exclude PAT Exclude files/dirs matching exact PAT\n");
     printf("  --diff FILE          Compare with snapshot cache FILE\n");
     printf("  --export FMT FILE    Export results to FILE in FMT (json|csv) and exit\n");
@@ -236,7 +310,6 @@ static void print_cli_usage(void) {
  * - relpath_from_abs/abspath_from_rel: converts between absolute and
  *   relative paths w.r.t. the scan root for on-disk persistence.
  */
-static int g_headless = 0;
 static int g_accuracy_mode = 0; // when set, compute disk usage using st_blocks and force deep rescan
 static int g_decorative = 0;    // decorative UI: separators, header bar, extra colors
 static int g_one_file_system = 0;
@@ -985,17 +1058,18 @@ static ssize_t cache_find_index_nl(CacheShard *s, const char *abs_path) {
 }
 
 static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_path,
-                                   unsigned long long size, time_t now,
-                                   unsigned long long ino, time_t dir_mtime) {
+                            unsigned long long size, time_t scan_time,
+                            unsigned long long ino, time_t mtime) {
+
     size_t h = cache_hash(abs_path);
     CacheShard *s = &c->shards[h];
     pthread_mutex_lock(&s->mu);
     ssize_t idx = cache_find_index_nl(s, abs_path);
     if (idx >= 0) {
         s->v[idx].size = size;
-        s->v[idx].last_scan = now;
+        s->v[idx].last_scan = scan_time;
         s->v[idx].ino = ino;
-        s->v[idx].dir_mtime = dir_mtime;
+        s->v[idx].dir_mtime = mtime;
     } else {
         if (s->n == s->cap) {
             size_t newcap = s->cap ? s->cap * 2 : 16;
@@ -1007,9 +1081,9 @@ static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_p
         e->abs_path = xstrdup(abs_path);
         e->rel_path = relpath_from_abs(root, abs_path);
         e->size = size;
-        e->last_scan = now;
+        e->last_scan = scan_time;
         e->ino = ino;
-        e->dir_mtime = dir_mtime;
+        e->dir_mtime = mtime;
     }
     pthread_mutex_unlock(&s->mu);
 }
@@ -5214,8 +5288,11 @@ int main(int argc, char **argv) {
     int show_version = 0;
     int cli_help_flag = 0;
     int server_mode = 0;
+    int headless = 0;
     const char *path_arg = NULL;
+    const char *remote_uri = NULL;
     int headless_flag = 0;
+    int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
     const char *export_format = NULL;
     const char *export_file = NULL;
     const char *snapshot_file = NULL;
@@ -5224,6 +5301,8 @@ int main(int argc, char **argv) {
             reload_flag = 1;
         } else if (strcmp(argv[i], "--server") == 0) {
             server_mode = 1;
+        } else if (strcmp(argv[i], "--connect") == 0 || strcmp(argv[i], "-c") == 0) {
+            if (i + 1 < argc) remote_uri = argv[++i];
         } else if (strcmp(argv[i], "--diff") == 0) {
             if (i + 1 < argc) snapshot_file = argv[++i];
         } else if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exclude") == 0) {
@@ -5279,7 +5358,7 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    int headless = !(isatty(STDIN_FILENO) && isatty(STDOUT_FILENO));
+    headless = !(isatty(STDIN_FILENO) && isatty(STDOUT_FILENO));
     const char *env_headless = getenv("FASTDU_HEADLESS");
     if (env_headless && env_headless[0] == '1') headless = 1;
     if (headless_flag) headless = 1;
@@ -5288,9 +5367,14 @@ int main(int argc, char **argv) {
     if (debug_all) fprintf(stderr, "[dbg] args parsed: headless=%d reload=%d jobs=%d path=%s\n", headless, reload_flag, jobs_override, path_arg ? path_arg : "(cwd)");
 
     char root[PATH_MAX];
-    if (!realpath(root_in, root)) {
-fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
-        return 1;
+    if (remote_uri) {
+        strncpy(root, remote_uri, sizeof(root)-1);
+        root[sizeof(root)-1] = '\0';
+    } else {
+        if (!realpath(root_in, root)) {
+            fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
+            return 1;
+        }
     }
 
     struct stat st_root;
@@ -5342,74 +5426,79 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
     Cache cache; cache_init(&cache);
     cache_init(&g_snapshot_cache);
 
-    if (snapshot_file) {
-        if (cache_load_file(snapshot_file, root, &g_snapshot_cache) > 0) {
-            g_diff_mode = 1;
-            if (debug_all) fprintf(stderr, "[main] snapshot loaded from %s\n", snapshot_file);
+    char *cache_abs = NULL;
+    if (remote_uri) {
+        run_client_connect(remote_uri, &cache);
+    } else {
+        if (snapshot_file) {
+            if (cache_load_file(snapshot_file, root, &g_snapshot_cache) > 0) {
+                g_diff_mode = 1;
+                if (debug_all) fprintf(stderr, "[main] snapshot loaded from %s\n", snapshot_file);
+            } else {
+                fprintf(stderr, "Warning: could not load snapshot from %s\n", snapshot_file);
+            }
+        }
+
+        int have_cache = 0;
+        debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
+        if (debug_cache) fprintf(stderr, "[main] cache_load root=%s\n", root);
+        if (!reload_flag) have_cache = cache_load(root, &cache);
+        if (debug_cache) fprintf(stderr, "[main] cache_load done have_cache=%d\n", have_cache);
+        char *cache_abs = path_join(root, CACHE_FILENAME);
+
+        if (debug_all) fprintf(stderr, "[dbg] have_cache=%d reload=%d\n", have_cache, reload_flag);
+        if (g_accuracy_mode) reload_flag = 1; // accuracy implies deep rescan ignoring cache
+        if (!have_cache || reload_flag) {
+            if (!headless) {
+                erase();
+                draw_header(root, root, &cache);
+                refresh();
+            }
+            if (g_accuracy_mode) {
+                // Strict single-thread recursive scan with UI progress
+                ScanUI ui = { .enabled = (g_tui_active ? 1 : 0), .count = 0, .phase = "Scanning (accurate)" };
+                clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
+                (void)scan_dir_recursive(root, root, cache_abs, &cache, &ui);
+                // Clear progress line
+                if (!headless) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
+                // Totali accurati
+                unsigned long long rs = 0ULL;
+                cache_get_info(&cache, root, &rs, NULL, NULL);
+                g_last_bytes = rs;
+                g_last_files = count_files_path(root);
+            } else {
+                int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
+                if (threads < 1) threads = 1;
+                if (threads > 64) threads = 64;
+                (void)scan_dir_parallel_deep(root, cache_abs, &cache, threads);
+                
+                // Sync footer totals from fresh scan
+                unsigned long long rs = 0ULL;
+                if (cache_get_info(&cache, root, &rs, NULL, NULL)) {
+                    g_last_bytes = rs;
+                }
+                g_last_files = count_files_path(root);
+            }
+            cache_save(root, &cache);
+            if (!headless) {
+                int cols, rows; getmaxyx(stdscr, rows, cols);
+                mvhline(rows-1, 0, ' ', cols);
+                refresh();
+            }
         } else {
-            fprintf(stderr, "Warning: could not load snapshot from %s\n", snapshot_file);
-        }
-    }
-
-    int have_cache = 0;
-    int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
-    if (debug_cache) fprintf(stderr, "[main] cache_load root=%s\n", root);
-    if (!reload_flag) have_cache = cache_load(root, &cache);
-    if (debug_cache) fprintf(stderr, "[main] cache_load done have_cache=%d\n", have_cache);
-    char *cache_abs = path_join(root, CACHE_FILENAME);
-
-    if (debug_all) fprintf(stderr, "[dbg] have_cache=%d reload=%d\n", have_cache, reload_flag);
-    if (g_accuracy_mode) reload_flag = 1; // accuracy implies deep rescan ignoring cache
-    if (!have_cache || reload_flag) {
-        if (!headless) {
-            erase();
-            draw_header(root, root, &cache);
-            refresh();
-        }
-        if (g_accuracy_mode) {
-            // Strict single-thread recursive scan with UI progress
-            ScanUI ui = { .enabled = (g_tui_active ? 1 : 0), .count = 0, .phase = "Scanning (accurate)" };
-            clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
-            (void)scan_dir_recursive(root, root, cache_abs, &cache, &ui);
-            // Clear progress line
-            if (!headless) { int cols, rows; getmaxyx(stdscr, rows, cols); mvhline(rows-1, 0, ' ', cols); refresh(); }
-            // Totali accurati
+            // Cache loaded: set footer totals from cache root entry (v2/v3)
             unsigned long long rs = 0ULL;
             cache_get_info(&cache, root, &rs, NULL, NULL);
             g_last_bytes = rs;
-            g_last_files = count_files_path(root);
-        } else {
-            int threads = jobs_override > 0 ? jobs_override : (int)sysconf(_SC_NPROCESSORS_ONLN);
-            if (threads < 1) threads = 1;
-            if (threads > 64) threads = 64;
-            (void)scan_dir_parallel_deep(root, cache_abs, &cache, threads);
-            
-            // Sync footer totals from fresh scan
-            unsigned long long rs = 0ULL;
-            if (cache_get_info(&cache, root, &rs, NULL, NULL)) {
-                g_last_bytes = rs;
-            }
-            g_last_files = count_files_path(root);
+            // totals_files is already set by cache_load parsing (version 3 or row counting)
         }
-        cache_save(root, &cache);
-        if (!headless) {
-            int cols, rows; getmaxyx(stdscr, rows, cols);
-            mvhline(rows-1, 0, ' ', cols);
-            refresh();
-        }
-    } else {
-        // Cache loaded: set footer totals from cache root entry (v2/v3)
-        unsigned long long rs = 0ULL;
-        cache_get_info(&cache, root, &rs, NULL, NULL);
-        g_last_bytes = rs;
-        // totals_files is already set by cache_load parsing (version 3 or row counting)
+        if (cache_abs) free(cache_abs);
     }
 
     if (server_mode) {
         run_server(root, &cache);
         cache_free(&cache);
         cache_free(&g_snapshot_cache);
-        free(cache_abs);
         return 0;
     }
 
