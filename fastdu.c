@@ -5371,18 +5371,23 @@ int main(int argc, char **argv) {
         strncpy(root, remote_uri, sizeof(root)-1);
         root[sizeof(root)-1] = '\0';
     } else {
+        // Suggerimento se l'utente dimentica -c ma mette un path che sembra remoto
+        if (strchr(root_in, ':') && !strchr(root_in, '/')) {
+            fprintf(stderr, "Hint: it looks like you are trying to connect to a remote server.\n");
+            fprintf(stderr, "Use: fastdu --connect %s\n\n", root_in);
+        }
+
         if (!realpath(root_in, root)) {
             fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
             return 1;
         }
-    }
 
-    struct stat st_root;
-    if (stat(root, &st_root) == 0) {
-        g_root_dev = st_root.st_dev;
+        struct stat st_root;
+        if (stat(root, &st_root) == 0) {
+            g_root_dev = st_root.st_dev;
+        }
+        load_fastduignore(root);
     }
-
-    load_fastduignore(root);
 
     // TTY / headless setup
     if (!headless) {
