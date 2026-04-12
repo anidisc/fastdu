@@ -43,10 +43,26 @@ theme = "dracula"
 # editor = "nvim"
 
 # ---------------------------------------------------------
+# FILE ASSOCIATIONS (Open with Ctrl+O)
+# ---------------------------------------------------------
+# Map file extensions to specific commands.
+# If an extension is not defined here, fastdu will use the system's
+# default handler (xdg-open on Linux, open on macOS).
+#
+# Format: [associations]
+#         ext = "command"
+
+[associations]
+# pdf = "zathura"
+# png = "sxiv"
+# jpg = "sxiv"
+# mp4 = "mpv"
+
+# ---------------------------------------------------------
 # PARSER NOTES
 # ---------------------------------------------------------
 # 1. Lines starting with # are comments.
-# 2. Section headers like [main] are currently ignored.
+# 2. Section headers like [associations] are required for mapping.
 # 3. Use spaces around the equal sign (e.g., key = value).
 # 4. Double quotes around string values are optional but recommended.
 # 5. Case-insensitive color names and theme names.

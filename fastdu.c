@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.66.0"
+#define FASTDU_VERSION "0.67.0"
 
 static int g_global_search_mode = 0;
 typedef struct {
@@ -210,9 +210,16 @@ static const char *g_bat_cmd = NULL; // Cached bat command
 static dev_t g_root_dev = 0;
 
 typedef struct {
+    char ext[32];
+    char cmd[128];
+} ExtAssociation;
+
+typedef struct {
     short pairs[9][2]; // [pair_id][fg, bg]
     int keys[256];     // mappatura tasti custom
     char editor[256];  // external editor command
+    ExtAssociation associations[64];
+    int num_associations;
 } AppConfig;
 
 static AppConfig g_config;
@@ -257,6 +264,7 @@ static void load_default_config(void) {
     g_config.pairs[7][0] = COLOR_RED;    g_config.pairs[7][1] = -1;           // size large
     g_config.pairs[8][0] = COLOR_YELLOW; g_config.pairs[8][1] = COLOR_BLUE;   // highlight
     g_config.editor[0] = '\0'; // default empty
+    g_config.num_associations = 0;
 }
 
 static void init_app_colors(void) {
@@ -329,30 +337,46 @@ static void load_config_file(void) {
     if (!f) return;
 
     char line[512];
+    int section_associations = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || line[0] == '[' || line[0] == '\n') continue;
+        // Rimuovi spazi iniziali e finali
+        char *p = line;
+        while (isspace(*p)) p++;
+        if (*p == '#' || *p == '\0') continue;
+
+        if (*p == '[') {
+            if (strstr(p, "[associations]")) section_associations = 1;
+            else section_associations = 0;
+            continue;
+        }
+
         char key[128], val[128];
-        if (sscanf(line, "%127s = %127s", key, val) == 2) {
-            // Rimuovi eventuali virgolette dai valori stringa
-            if (val[0] == '"') {
-                size_t len = strlen(val);
-                if (val[len-1] == '"') val[len-1] = '\0';
-                memmove(val, val + 1, len);
-            }
+        if (sscanf(p, "%127[^= ] = \"%127[^\"]\"", key, val) == 2 || 
+            sscanf(p, "%127[^= ] = %127s", key, val) == 2) {
             
-            if (strcmp(key, "theme") == 0) apply_theme(val);
-            else if (strcmp(key, "editor") == 0) {
-                strncpy(g_config.editor, val, sizeof(g_config.editor)-1);
-                g_config.editor[sizeof(g_config.editor)-1] = '\0';
+            if (section_associations) {
+                if (g_config.num_associations < 64) {
+                    strncpy(g_config.associations[g_config.num_associations].ext, key, 31);
+                    g_config.associations[g_config.num_associations].ext[31] = '\0';
+                    strncpy(g_config.associations[g_config.num_associations].cmd, val, 127);
+                    g_config.associations[g_config.num_associations].cmd[127] = '\0';
+                    g_config.num_associations++;
+                }
+            } else {
+                if (strcmp(key, "theme") == 0) apply_theme(val);
+                else if (strcmp(key, "editor") == 0) {
+                    strncpy(g_config.editor, val, sizeof(g_config.editor)-1);
+                    g_config.editor[sizeof(g_config.editor)-1] = '\0';
+                }
+                else if (strcmp(key, "header_fg") == 0) g_config.pairs[1][0] = parse_color(val);
+                else if (strcmp(key, "header_bg") == 0) g_config.pairs[1][1] = parse_color(val);
+                else if (strcmp(key, "accent_fg") == 0) g_config.pairs[2][0] = parse_color(val);
+                else if (strcmp(key, "dir_fg") == 0)    g_config.pairs[3][0] = parse_color(val);
+                else if (strcmp(key, "file_fg") == 0)   g_config.pairs[4][0] = parse_color(val);
+                else if (strcmp(key, "size_s_fg") == 0) g_config.pairs[5][0] = parse_color(val);
+                else if (strcmp(key, "size_m_fg") == 0) g_config.pairs[6][0] = parse_color(val);
+                else if (strcmp(key, "size_l_fg") == 0) g_config.pairs[7][0] = parse_color(val);
             }
-            else if (strcmp(key, "header_fg") == 0) g_config.pairs[1][0] = parse_color(val);
-            else if (strcmp(key, "header_bg") == 0) g_config.pairs[1][1] = parse_color(val);
-            else if (strcmp(key, "accent_fg") == 0) g_config.pairs[2][0] = parse_color(val);
-            else if (strcmp(key, "dir_fg") == 0)    g_config.pairs[3][0] = parse_color(val);
-            else if (strcmp(key, "file_fg") == 0)   g_config.pairs[4][0] = parse_color(val);
-            else if (strcmp(key, "size_s_fg") == 0) g_config.pairs[5][0] = parse_color(val);
-            else if (strcmp(key, "size_m_fg") == 0) g_config.pairs[6][0] = parse_color(val);
-            else if (strcmp(key, "size_l_fg") == 0) g_config.pairs[7][0] = parse_color(val);
         }
     }
     fclose(f);
@@ -3673,6 +3697,36 @@ static void launch_subshell(const char *path) {
     refresh();
 }
 
+static void open_with_default(const char *path) {
+    const char *ext = get_file_extension(path);
+    const char *cmd_to_use = "xdg-open"; // Default fallback
+    char msg[256];
+
+    // Se l'estensione ha un punto (es. ".pdf"), cerchiamo sia con che senza
+    const char *ext_no_dot = (ext[0] == '.') ? ext + 1 : ext;
+
+    for (int i = 0; i < g_config.num_associations; i++) {
+        const char *assoc_ext = g_config.associations[i].ext;
+        const char *assoc_ext_no_dot = (assoc_ext[0] == '.') ? assoc_ext + 1 : assoc_ext;
+        
+        if (strcasecmp(ext_no_dot, assoc_ext_no_dot) == 0) {
+            cmd_to_use = g_config.associations[i].cmd;
+            break;
+        }
+    }
+
+    char shell_cmd[PATH_MAX + 256];
+    snprintf(shell_cmd, sizeof(shell_cmd), "%s \"%s\" >/dev/null 2>&1 &", cmd_to_use, path);
+    
+    if (system(shell_cmd) == -1) {
+        snprintf(msg, sizeof(msg), "Failed to launch: %s", cmd_to_use);
+        draw_status(msg);
+    } else {
+        snprintf(msg, sizeof(msg), "Opening with: %s", cmd_to_use);
+        draw_status(msg);
+    }
+}
+
 static void launch_external_editor(const char *path) {
     char cmd[PATH_MAX + 256];
     const char *editor = g_config.editor;
@@ -6233,16 +6287,10 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 view_free(&dv);
                 build_dir_view(current, root, &cache, &dv);
             }
-        } else if (ch == 'O') {
+        } else if (ch == 'O' || ch == 15) { // Shift+O or Ctrl+O
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
-                char cmd[PATH_MAX + 64];
-                snprintf(cmd, sizeof(cmd), "xdg-open \"%s\" >/dev/null 2>&1 &", ve->abs_path);
-                if (system(cmd) == -1) {
-                    draw_status("Failed to launch xdg-open.");
-                } else {
-                    draw_status("Opening with system default...");
-                }
+                open_with_default(ve->abs_path);
             }
         } else if (ch == 'o') {
             // cycle sort key (size -> name -> mtime -> extension [-> delta] -> size)
