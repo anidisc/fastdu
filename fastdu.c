@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.72.0"
+#define FASTDU_VERSION "0.72.1"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -7002,7 +7002,9 @@ draw_status("No items marked.");
 
                     if (rc == 0) {
                         size_t old_index = dv.selected;
-                        if (ve->is_dir) cache_remove_prefix(&cache, ve->abs_path);
+                        // Rimuoviamo SEMPRE l'elemento dalla cache (sia file che dir)
+                        cache_remove_prefix(&cache, ve->abs_path);
+                        
                         cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
                         if (g_last_bytes > delta) g_last_bytes -= delta; else g_last_bytes = 0ULL;
                         if (!g_is_remote) {
