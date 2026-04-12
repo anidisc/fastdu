@@ -138,12 +138,13 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.65.0"
+#define FASTDU_VERSION "0.65.1"
 
 static int g_global_search_mode = 0;
 typedef struct {
     char *abs_path;
     unsigned long long size;
+    int is_dir;
 } SearchResult;
 static SearchResult *g_search_results = NULL;
 static size_t g_search_results_count = 0;
@@ -1581,12 +1582,24 @@ static void perform_global_search(Cache *cache, const char *query) {
     search_results_free();
     if (!query || query[0] == '\0') return;
 
+    int full_path_search = (query[0] == '/');
+    const char *search_term = full_path_search ? query + 1 : query;
+    if (search_term[0] == '\0') return;
+
     for (int i = 0; i < CACHE_SHARDS; i++) {
         pthread_mutex_lock(&cache->shards[i].mu);
         for (size_t j = 0; j < cache->shards[i].n; j++) {
             CacheEntry *e = &cache->shards[i].v[j];
-            if (strcasestr_bool(e->abs_path, query)) {
-                if (g_search_results_count >= 1000) break; // Limit to 1000 results
+            int match = 0;
+            if (full_path_search) {
+                if (strcasestr_bool(e->abs_path, search_term)) match = 1;
+            } else {
+                const char *base = path_basename_const(e->abs_path);
+                if (strcasestr_bool(base, search_term)) match = 1;
+            }
+
+            if (match) {
+                if (g_search_results_count >= 1000) break;
                 
                 if (g_search_results_count == g_search_results_cap) {
                     size_t newcap = g_search_results_cap ? g_search_results_cap * 2 : 64;
@@ -1597,6 +1610,14 @@ static void perform_global_search(Cache *cache, const char *query) {
                 }
                 g_search_results[g_search_results_count].abs_path = xstrdup(e->abs_path);
                 g_search_results[g_search_results_count].size = e->size;
+                // Heuristic for is_dir: directories in cache usually have ino > 0 and often size 0 if just created or actual dir size if scanned
+                // For precision, we can use a quick stat only on matches
+                struct stat st;
+                if (lstat(e->abs_path, &st) == 0) {
+                    g_search_results[g_search_results_count].is_dir = S_ISDIR(st.st_mode);
+                } else {
+                    g_search_results[g_search_results_count].is_dir = (e->ino > 0 && e->size == 0);
+                }
                 g_search_results_count++;
             }
         }
@@ -3428,7 +3449,7 @@ static void draw_column(const DirView *dv, int top, int x, int width, int is_act
 static void draw_search_results(int rows, int cols) {
     attron(COLOR_PAIR(2) | A_BOLD);
     mvhline(1, 0, ' ', cols);
-    mvprintw(1, 0, " Global Search Results: %zu matches (Limit 1000) ", g_search_results_count);
+    mvprintw(1, 0, " Global Search (Basename match, use '/' prefix for Path search) - %zu matches ", g_search_results_count);
     attroff(COLOR_PAIR(2) | A_BOLD);
 
     int list_rows = rows - 3 - (g_decorative ? 2 : 0);
@@ -3438,16 +3459,32 @@ static void draw_search_results(int rows, int cols) {
 
         int y = (g_decorative ? 3 : 2) + i;
         int is_sel = (idx == g_search_selected);
+        SearchResult *res = &g_search_results[idx];
 
         if (is_sel) attron(COLOR_PAIR(8) | A_BOLD);
+        else if (res->is_dir) attron(COLOR_PAIR(3));
         else attron(COLOR_PAIR(4));
 
         mvhline(y, 0, ' ', cols);
-        char szbuf[32]; human_size(g_search_results[idx].size, szbuf, sizeof(szbuf));
-        mvaddstr(y, 0, szbuf);
-        mvprintw(y, 10, " %s", g_search_results[idx].abs_path);
+        char szbuf[32]; human_size(res->size, szbuf, sizeof(szbuf));
+        mvprintw(y, 0, "%-10s ", szbuf);
+        
+        const char *type_label = res->is_dir ? "[D] " : "[F] ";
+        mvaddstr(y, 11, type_label);
+        
+        const char *base = path_basename_const(res->abs_path);
+        mvaddstr(y, 15, base);
+        
+        // Draw directory path in gray/faded color if space permits
+        int base_len = (int)strlen(base);
+        if (cols > 15 + base_len + 5) {
+            attron(A_DIM);
+            mvprintw(y, 15 + base_len + 2, "(%s)", res->abs_path);
+            attroff(A_DIM);
+        }
 
         if (is_sel) attroff(COLOR_PAIR(8) | A_BOLD);
+        else if (res->is_dir) attroff(COLOR_PAIR(3));
         else attroff(COLOR_PAIR(4));
     }
     
