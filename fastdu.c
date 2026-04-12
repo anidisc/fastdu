@@ -3070,7 +3070,6 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     // --- Line 0: Main Header ---
     move(0, 0);
     attron(COLOR_PAIR(1)); addstr(" fastdu ");
-    attron(A_BOLD); addstr(FASTDU_VERSION);
     attron(A_NORMAL); addstr(" - root: ");
     attron(COLOR_PAIR(8) | A_BOLD); addstr(root);
     attron(COLOR_PAIR(1)); addstr(" - cwd: ");
@@ -3135,7 +3134,12 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     }
 
     move(rows-2, 0);
-    attron(COLOR_PAIR(1)); addstr(" h help | ");
+    attron(COLOR_PAIR(1));
+    if (g_is_remote) {
+        attron(COLOR_PAIR(7) | A_BOLD); addstr(" REMOTE "); 
+        attron(COLOR_PAIR(1) | A_NORMAL); addstr(" | ");
+    }
+    addstr(" h help | ");
     if (g_diff_mode) {
         attron(COLOR_PAIR(8) | A_BOLD); addstr("DIFF");
         attron(COLOR_PAIR(1)); addstr(" | ");
@@ -3158,13 +3162,13 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         attron(COLOR_PAIR(8) | A_BOLD); addstr(g_search_query);
     }
 
-    // --- Theme info at the far right of the Footer ---
-    char themebuf[32];
-    snprintf(themebuf, sizeof(themebuf), " T:[%s] ", g_themes[g_current_theme_idx]);
-    int tw = (int)strlen(themebuf);
-    if (cols > tw + cx + 20) {
+    // --- Theme & Version info at the far right of the Footer ---
+    char info_right[64];
+    snprintf(info_right, sizeof(info_right), " %s T:[%s] ", FASTDU_VERSION, g_themes[g_current_theme_idx]);
+    int tw = (int)strlen(info_right);
+    if (cols > tw + 40) {
         attron(COLOR_PAIR(1));
-        mvaddnstr(rows-2, cols - tw, themebuf, tw);
+        mvaddnstr(rows-2, cols - tw, info_right, tw);
     }
 
     attron(COLOR_PAIR(1)); // Final reset
