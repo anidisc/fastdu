@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.65.2"
+#define FASTDU_VERSION "0.66.0"
 
 static int g_global_search_mode = 0;
 typedef struct {
@@ -647,6 +647,14 @@ static int strcasestr_bool(const char *hay, const char *needle) {
 static const char *path_basename_const(const char *p) {
     const char *slash = strrchr(p, '/');
     return slash ? slash + 1 : p;
+}
+
+static const char *get_file_extension(const char *path) {
+    const char *base = path_basename_const(path);
+    const char *dot = strrchr(base, '.');
+    // If no dot, or it's the first char (hidden file with no further extension like .bashrc), return empty
+    if (!dot || dot == base) return "";
+    return dot;
 }
 
 // ------------------------------
@@ -1705,13 +1713,14 @@ static void view_free(DirView *dv) {
 }
 
 // Global sort mode
-typedef enum { SORT_SIZE = 0, SORT_NAME = 1, SORT_MTIME = 2, SORT_DELTA = 3 } SortMode;
+typedef enum { SORT_SIZE = 0, SORT_NAME = 1, SORT_MTIME = 2, SORT_DELTA = 3, SORT_EXT = 4 } SortMode;
 static SortMode g_sort_mode = SORT_SIZE;
 static const char *sort_mode_label(void) {
     switch (g_sort_mode) {
         case SORT_NAME: return "name";
         case SORT_MTIME: return "mtime";
         case SORT_DELTA: return "delta";
+        case SORT_EXT: return "extension";
         default: return "size";
     }
 }
@@ -1762,6 +1771,12 @@ static int cmp_entries(const void *a, const void *b) {
     if (g_sort_mode == SORT_NAME) {
         // pure alphabetical with asc/desc toggle
         int c = strcmp(ea->name, eb->name);
+        return g_sort_desc ? -c : c;
+    } else if (g_sort_mode == SORT_EXT) {
+        const char *exta = get_file_extension(ea->name);
+        const char *extb = get_file_extension(eb->name);
+        int c = strcasecmp(exta, extb);
+        if (c == 0) c = strcmp(ea->name, eb->name); // tie-break with name
         return g_sort_desc ? -c : c;
     } else if (g_sort_mode == SORT_MTIME) {
         // sort by modification time; newer first if desc
@@ -6230,11 +6245,12 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 }
             }
         } else if (ch == 'o') {
-            // cycle sort key (size -> name -> mtime [-> delta] -> size), keep selection on same path
+            // cycle sort key (size -> name -> mtime -> extension [-> delta] -> size)
             SortMode next_mode;
             if (g_sort_mode == SORT_SIZE) next_mode = SORT_NAME;
             else if (g_sort_mode == SORT_NAME) next_mode = SORT_MTIME;
-            else if (g_sort_mode == SORT_MTIME) next_mode = g_diff_mode ? SORT_DELTA : SORT_SIZE;
+            else if (g_sort_mode == SORT_MTIME) next_mode = SORT_EXT;
+            else if (g_sort_mode == SORT_EXT) next_mode = g_diff_mode ? SORT_DELTA : SORT_SIZE;
             else next_mode = SORT_SIZE; // back from delta
 
             if (dv.n > 0) {
