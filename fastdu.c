@@ -138,15 +138,23 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.71.1"
+#define FASTDU_VERSION "0.72.0"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
 static int g_is_remote = 0;   // Se attivo sul client, indica che stiamo visualizzando dati remoti
+static char g_server_root[PATH_MAX] = ""; // Percorso reale sul server remoto
 
 // Forward declarations
+static void cache_init(Cache *c);
+static void cache_free(Cache *c);
+static int cache_save(const char *root, const Cache *c);
+static int cache_load(const char *root, Cache *c);
 static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_path, unsigned long long size, time_t scan_time, unsigned long long ino, time_t mtime);
 static int cache_get_info(Cache *c, const char *abs_path, unsigned long long *size, time_t *mtime, unsigned long long *ino);
+static void cache_remove_prefix(Cache *c, const char *prefix);
+static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
+static int remove_tree(const char *path, const char *cache_file_abs);
 static unsigned long long g_last_files = 0ULL;
 static unsigned long long g_last_bytes = 0ULL;
 typedef struct {
@@ -169,6 +177,38 @@ static int g_tree_mode = 0; // Tree view mode toggle
 // ------------------------------
 // Remote Protocol (Simplified Text-based)
 // ------------------------------
+static void handle_remote_command(const char *cmd, const char *root, const char *target) {
+    if (strcmp(cmd, "delete") == 0) {
+        Cache cache; cache_init(&cache);
+        if (cache_load(root, &cache) <= 0) {
+            // Se non c'è cache, proviamo comunque a cancellare ma non aggiorniamo cache
+            if (remove_tree(target, NULL) == 0) printf("OK\n");
+            else printf("ERROR could not delete file\n");
+            cache_free(&cache);
+            return;
+        }
+        
+        unsigned long long sz = 0;
+        if (cache_get_info(&cache, target, &sz, NULL, NULL)) {
+            if (remove_tree(target, NULL) == 0) {
+                cache_remove_prefix(&cache, target);
+                cache_adjust_ancestors_after_delta(&cache, root, target, (long long)(-sz));
+                cache_save(root, &cache);
+                printf("OK\n");
+            } else {
+                printf("ERROR physical delete failed\n");
+            }
+        } else {
+            // Elemento non in cache, proviamo a cancellare comunque
+            if (remove_tree(target, NULL) == 0) printf("OK\n");
+            else printf("ERROR item not found\n");
+        }
+        cache_free(&cache);
+    } else {
+        printf("ERROR unknown command\n");
+    }
+}
+
 static void run_server(const char *root, Cache *cache) {
     // Invia INIT
     printf("INIT\t%s\n", root);
@@ -238,6 +278,34 @@ static char *download_remote_file(const char *abs_path) {
     return tmp_path;
 }
 
+static int remote_delete(const char *target_abs) {
+    char host[256], rpath[PATH_MAX];
+    if (!parse_remote_uri(target_abs, host, rpath)) return -1;
+    
+    char cmd[PATH_MAX + 512];
+    // Sintassi server: --remote-cmd delete <root> <target>
+    if (g_ssh_socket[0] != '\0') {
+        snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"fastdu --remote-cmd delete '%s' '%s'\"", 
+                 g_ssh_socket, host, g_server_root, rpath);
+    } else {
+        snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd delete '%s' '%s'\"", 
+                 host, g_server_root, rpath);
+    }
+    
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return -1;
+    
+    char res[64] = "";
+    if (fgets(res, sizeof(res), fp)) {
+        if (strncmp(res, "OK", 2) == 0) {
+            pclose(fp);
+            return 0;
+        }
+    }
+    pclose(fp);
+    return -1;
+}
+
 static void run_client_connect(const char *uri, Cache *cache, int reload_remote) {
     char host[256];
     char rpath[PATH_MAX];
@@ -262,6 +330,7 @@ static void run_client_connect(const char *uri, Cache *cache, int reload_remote)
         if (strncmp(line, "INIT\t", 5) == 0) {
             strncpy(server_root, line + 5, sizeof(server_root)-1);
             char *nl = strchr(server_root, '\n'); if (nl) *nl = '\0';
+            strncpy(g_server_root, server_root, sizeof(g_server_root)-1);
         } else if (strncmp(line, "DIR\t", 4) == 0 || strncmp(line, "FILE\t", 5) == 0) {
             int is_dir = (line[0] == 'D');
             const char *data_ptr = is_dir ? line + 4 : line + 5;
@@ -5390,8 +5459,10 @@ int main(int argc, char **argv) {
     int show_version = 0;
     int cli_help_flag = 0;
     int server_mode = 0;
+    const char *remote_cmd = NULL;
     const char *remote_uri = NULL;
-    const char *path_arg = NULL;
+    const char *path_args[8];
+    int num_path_args = 0;
     int headless_flag = 0;
     int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
     const char *export_format = NULL;
@@ -5402,6 +5473,8 @@ int main(int argc, char **argv) {
             reload_flag = 1;
         } else if (strcmp(argv[i], "--server") == 0) {
             server_mode = 1;
+        } else if (strcmp(argv[i], "--remote-cmd") == 0) {
+            if (i + 1 < argc) remote_cmd = argv[++i];
         } else if (strcmp(argv[i], "--connect") == 0 || strcmp(argv[i], "-c") == 0) {
             if (i + 1 < argc) remote_uri = argv[++i];
         } else if (strcmp(argv[i], "--diff") == 0) {
@@ -5430,10 +5503,12 @@ int main(int argc, char **argv) {
             g_decorative = 1;
         } else if (strcmp(argv[i], "-nf") == 0 || strcmp(argv[i], "--nerd-fonts") == 0) {
             g_use_nerd_fonts = 1;
-        } else {
-            path_arg = argv[i];
+        } else if (argv[i][0] != '-') {
+            if (num_path_args < 8) path_args[num_path_args++] = argv[i];
         }
     }
+
+    const char *path_arg = (num_path_args > 0) ? path_args[0] : NULL;
 
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd))) {
@@ -5448,6 +5523,14 @@ int main(int argc, char **argv) {
     } else {
         strncpy(root_in, cwd, sizeof(root_in));
         root_in[sizeof(root_in)-1] = '\0';
+    }
+
+    if (remote_cmd) {
+        // Syntax: --remote-cmd cmd root target
+        const char *target = (num_path_args > 1) ? path_args[1] : NULL;
+        if (!target) { printf("ERROR missing target\n"); return 1; }
+        handle_remote_command(remote_cmd, root_in, target);
+        return 0;
     }
 
     if (show_version) {
@@ -6850,14 +6933,40 @@ draw_status("No items marked.");
                 if (chc=='y'||chc=='Y'){
                     for (size_t i=0;i<n;i++){
                         const char *p = list[i];
-                        // compute delta bytes and files
-                        unsigned long long delta=0ULL; struct stat st; int is_dir=0;
-                        if (lstat(p,&st)==0){ if (S_ISDIR(st.st_mode)){ is_dir=1; if(!cache_get_info(&cache,p,&delta,NULL,NULL)) delta=scan_dir_recursive(p, root, cache_abs, &cache, NULL);} else if (S_ISREG(st.st_mode)) delta=(unsigned long long)st.st_size; }
-                        unsigned long long files_dec = count_files_path(p);
-                        // delete
-                        if (remove_tree(p, cache_abs)==0){ if (is_dir) cache_remove_prefix(&cache,p); cache_adjust_ancestors_after_delta(&cache, root, p, (long long)delta); if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL; }
+                        unsigned long long delta=0ULL;
+                        int is_dir=0;
+                        
+                        // Cerchiamo info nella cache locale prima di eliminare
+                        if (!cache_get_info(&cache, p, &delta, NULL, NULL)) delta = 0;
+                        // Nota: qui potremmo migliorare il rilevamento is_dir per il remoto
+                        // Per ora usiamo una ricerca veloce nella cache
+                        for (int k=0; k<CACHE_SHARDS; k++) {
+                            pthread_mutex_lock(&cache.shards[k].mu);
+                            for (size_t m=0; m<cache.shards[k].n; m++) {
+                                if (strcmp(cache.shards[k].v[m].abs_path, p) == 0) {
+                                    is_dir = (cache.shards[k].v[m].ino > 0);
+                                    break;
+                                }
+                            }
+                            pthread_mutex_unlock(&cache.shards[k].mu);
+                            if (is_dir) break;
+                        }
+
+                        int rc = -1;
+                        if (g_is_remote) {
+                            rc = remote_delete(p);
+                        } else {
+                            rc = remove_tree(p, cache_abs);
+                        }
+
+                        if (rc == 0) {
+                            if (is_dir) cache_remove_prefix(&cache, p);
+                            cache_adjust_ancestors_after_delta(&cache, root, p, (long long)(-delta));
+                            if (g_last_bytes > delta) g_last_bytes -= delta; else g_last_bytes = 0ULL;
+                            if (g_last_files > 0) g_last_files--; // Decremento semplice
+                        }
                     }
-                    cache_save(root,&cache);
+                    if (!g_is_remote) cache_save(root, &cache);
                     // clear marks that were deleted
                     if (list) {
                         for(size_t i=0;i<n;i++) {
@@ -6880,48 +6989,37 @@ draw_status("No items marked.");
             } else if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
                 if (confirm_delete_prompt(ve->name, ve->is_dir)) {
-                    // Calcola delta prima di rimuovere
-                    struct stat st_before;
-                    int exists_before = (lstat(ve->abs_path, &st_before) == 0);
-                    unsigned long long delta = 0ULL;
-                    unsigned long long files_dec = 0ULL;
-                    int is_dir = ve->is_dir;
-                    if (exists_before) {
-                        files_dec = count_files_path(ve->abs_path);
-                        if (!is_dir && S_ISREG(st_before.st_mode)) {
-                            delta = (unsigned long long)st_before.st_size;
-                        } else if (is_dir) {
-                            if (!cache_get_info(&cache, ve->abs_path, &delta, NULL, NULL)) {
-                                // Stima dimensione della dir da eliminare (solo il subtree target)
-                                delta = scan_dir_recursive(ve->abs_path, root, cache_abs, &cache, NULL);
-                            }
-                        }
+                    unsigned long long delta = ve->size;
+                    unsigned long long files_dec = (ve->is_dir) ? count_files_path(ve->abs_path) : 1; 
+                    // Note: count_files_path fails locally for remote, but for remote we will trust ve->size and skip files_dec accuracy for now if remote
+                    
+                    int rc = -1;
+                    if (g_is_remote) {
+                        rc = remote_delete(ve->abs_path);
                     } else {
-                        draw_status("Error: File or directory no longer exists.");
-                        refresh();
-                        napms(1000);
+                        rc = remove_tree(ve->abs_path, cache_abs);
                     }
 
-                    // Elimina
-                    size_t old_index = dv.selected;
-                    int rc = remove_tree(ve->abs_path, cache_abs);
                     if (rc == 0) {
-                        if (is_dir) cache_remove_prefix(&cache, ve->abs_path);
-                        cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)delta);
+                        size_t old_index = dv.selected;
+                        if (ve->is_dir) cache_remove_prefix(&cache, ve->abs_path);
+                        cache_adjust_ancestors_after_delta(&cache, root, ve->abs_path, (long long)(-delta));
                         if (g_last_bytes > delta) g_last_bytes -= delta; else g_last_bytes = 0ULL;
-                        if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL;
-                        cache_save(root, &cache);
-                        // unmark removed path and any subpaths
+                        if (!g_is_remote) {
+                            if (g_last_files > files_dec) g_last_files -= files_dec; else g_last_files = 0ULL;
+                            cache_save(root, &cache);
+                        } else {
+                            // Per il remoto, decrementiamo solo di 1 per semplicità se non conosciamo figli
+                            if (g_last_files > 0) g_last_files--;
+                        }
+                        
                         markset_remove_prefix(&g_marks, ve->abs_path);
-                        // ricostruisci sola vista corrente (no rescan totale)
                         view_free(&dv);
                         build_dir_view(current, root, &cache, &dv);
                         if (dv.n > 0) dv.selected = (old_index < dv.n ? old_index : dv.n - 1);
                         draw_status("Erase completed.");
                     } else {
-                        char msg[PATH_MAX + 64];
-                        snprintf(msg, sizeof(msg), "Error deleting '%s'", ve->name);
-                        draw_status(msg);
+                        draw_status("Error deleting item.");
                     }
                 }
             }

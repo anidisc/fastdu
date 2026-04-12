@@ -38,7 +38,8 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
 
-### 10. Funzionalità Remote (Client/Server) - v0.71.1
+### 10. Funzionalità Remote (Client/Server) - v0.72.0
+- [x] **Cancellazione Remota ('d'):** Implementata la delega del comando di cancellazione al server con aggiornamento sincronizzato di entrambe le cache (locale e remota).
 - [x] **SSH Multiplexing (ControlMaster):** Riutilizzo della connessione master per rendere istantanee le anteprime e le operazioni senza chiedere ripetutamente la password.
 - [x] **Anteprima File Remoti ('v'):** Implementata la funzione di download on-demand per visualizzare file remoti usando il visualizzatore locale (o `bat`).
 - [x] **Apertura Esterna ('O'):** Possibilità di aprire file remoti con le app predefinite locali (scaricandoli temporaneamente).
