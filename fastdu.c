@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.70.0"
+#define FASTDU_VERSION "0.70.1"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -146,6 +146,9 @@ static int g_is_remote = 0;   // Se attivo sul client, indica che stiamo visuali
 
 // Forward declarations
 static void cache_upsert_with_meta(Cache *c, const char *root, const char *abs_path, unsigned long long size, time_t scan_time, unsigned long long ino, time_t mtime);
+static int cache_get_info(Cache *c, const char *abs_path, unsigned long long *size, time_t *mtime, unsigned long long *ino);
+static unsigned long long g_last_files = 0ULL;
+static unsigned long long g_last_bytes = 0ULL;
 typedef struct {
     char *abs_path;
     unsigned long long size;
@@ -238,6 +241,21 @@ static void run_client_connect(const char *uri, Cache *cache, int reload_remote)
     // NOTA: In questa versione semplificata chiudiamo la pipe dopo il caricamento.
     // In futuro la terremo aperta per i comandi DELETE.
     pclose(pipe);
+
+    // AGGIORNAMENTO TOTALI: Dopo la sync, interroghiamo la cache per la radice remota
+    unsigned long long root_size = 0ULL;
+    if (cache_get_info(cache, uri, &root_size, NULL, NULL)) {
+        g_last_bytes = root_size;
+    }
+    // Per il numero di file, facciamo un conteggio veloce della cache
+    g_last_files = 0;
+    for (int i = 0; i < CACHE_SHARDS; i++) {
+        pthread_mutex_lock(&cache->shards[i].mu);
+        for (size_t j = 0; j < cache->shards[i].n; j++) {
+            if (cache->shards[i].v[j].ino == 0) g_last_files++;
+        }
+        pthread_mutex_unlock(&cache->shards[i].mu);
+    }
 }
 
 static void print_cli_usage(void) {
@@ -1414,8 +1432,6 @@ static atomic_ullong g_progress_count = 0;
 static atomic_int     g_active_workers = 0;
 static atomic_ullong g_total_files = 0;
 static atomic_ullong g_total_bytes = 0;
-static unsigned long long g_last_files = 0ULL;
-static unsigned long long g_last_bytes = 0ULL;
 
 static int is_symlink_lstat(const char *path, struct stat *st) {
     struct stat lst;
@@ -2191,22 +2207,31 @@ static int build_dir_view(const char *path, const char *root, Cache *cache, DirV
                 CacheEntry *e = &cache->shards[i].v[j];
                 char *parent = get_parent(e->abs_path);
                 if (parent && strcmp(parent, path) == 0 && strcmp(e->abs_path, path) != 0) {
-                    if (out->n == out->cap) {
-                        size_t newcap = out->cap ? out->cap * 2 : 128;
-                        void *nv = realloc(out->v, newcap * sizeof(ViewEntry));
-                        if (nv) { out->v = (ViewEntry*)nv; out->cap = newcap; }
-                    }
-                    if (out->n < out->cap) {
-                        ViewEntry *ve = &out->v[out->n++];
-                        ve->name = xstrdup(path_basename_const(e->abs_path));
-                        ve->abs_path = xstrdup(e->abs_path);
-                        ve->is_dir = (e->ino > 0); 
-                        ve->size = e->size;
-                        ve->size_known = 1;
-                        ve->mtime = e->dir_mtime;
-                        ve->depth = 0;
-                        ve->expanded = 0;
-                        ve->delta = 0;
+                    int is_dir = (e->ino > 0);
+                    
+                    // --- LOGICA FILTRO 't' AGGIUNTA ---
+                    int include = 1;
+                    if (g_filter_mode == 1 && !is_dir) include = 0; // Solo cartelle
+                    if (g_filter_mode == 2 && is_dir) include = 0;  // Solo file
+                    
+                    if (include) {
+                        if (out->n == out->cap) {
+                            size_t newcap = out->cap ? out->cap * 2 : 128;
+                            void *nv = realloc(out->v, newcap * sizeof(ViewEntry));
+                            if (nv) { out->v = (ViewEntry*)nv; out->cap = newcap; }
+                        }
+                        if (out->n < out->cap) {
+                            ViewEntry *ve = &out->v[out->n++];
+                            ve->name = xstrdup(path_basename_const(e->abs_path));
+                            ve->abs_path = xstrdup(e->abs_path);
+                            ve->is_dir = is_dir; 
+                            ve->size = e->size;
+                            ve->size_known = 1;
+                            ve->mtime = e->dir_mtime;
+                            ve->depth = 0;
+                            ve->expanded = 0;
+                            ve->delta = 0;
+                        }
                     }
                 }
                 if (parent) free(parent);

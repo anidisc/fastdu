@@ -38,10 +38,10 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
 
-### 10. Funzionalità Remote (Client/Server)
-- [ ] **Modalità Server (`--server`):** Implementare un'interfaccia di comunicazione su `stdin`/`stdout` per permettere la scansione remota guidata da un client.
-- [ ] **Integrazione SSH:** Supporto per percorsi remoti (es. `user@host:/path`) avviando automaticamente il server remoto via SSH.
-- [ ] **Streaming della Cache:** Serializzazione efficiente e compressione dei dati di scansione per minimizzare la latenza di rete.
+### 10. Funzionalità Remote (Client/Server) - v0.70.1
+- [x] **Modalità Server (`--server`):** Implementare un'interfaccia di comunicazione su `stdin`/`stdout` per permettere la scansione remota guidata da un client.
+- [x] **Integrazione SSH:** Supporto per percorsi remoti (es. `user@host:/path`) avviando automaticamente il server remoto via SSH.
+- [x] **Streaming della Cache:** Serializzazione efficiente e compressione dei dati di scansione per minimizzare la latenza di rete.
 - [ ] **Operazioni Remote:** Permettere cancellazione, rinomina e spostamento di file sul server remoto tramite comandi inviati dal client.
 
 ### 6. Motore & Performance (Ottimizzazione Core)
@@ -56,7 +56,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 
 ### 8. Ecosistema & Estensioni
 - [x] **Esplorazione Archivi:** Permettere di entrare nei file `.zip`, `.tar.gz` o `.7z` come se fossero directory normali per esplorarne il contenuto.
-- [ ] **Filesystem Remoti:** Supporto per la scansione e navigazione di server remoti tramite protocolli SSH/SFTP.
+- [x] **Filesystem Remoti:** Supporto per la scansione e navigazione di server remoti tramite protocolli SSH/SFTP.
 - [ ] **Anteprime Grafiche:** Visualizzazione di anteprime immagini (tramite protocollo Sixel o Kitty) direttamente all'interno della TUI.
 
 ---
