@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.70.1"
+#define FASTDU_VERSION "0.70.2"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -6875,10 +6875,12 @@ draw_status("No items marked.");
     view_free(&dv);
     
     // FINAL DUMP: Overwrite cache file with current memory state
-    if (cache_save(root, &cache) == 0) {
-        if (debug_all) fprintf(stderr, "[cleanup] Cache saved successfully to %s\n", root);
-    } else {
-        fprintf(stderr, "[cleanup] Error saving cache to %s\n", root);
+    if (!g_is_remote) {
+        if (cache_save(root, &cache) == 0) {
+            if (debug_all) fprintf(stderr, "[cleanup] Cache saved successfully to %s\n", root);
+        } else {
+            fprintf(stderr, "[cleanup] Error saving cache to %s\n", root);
+        }
     }
 
     cache_free(&cache);

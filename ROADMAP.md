@@ -38,7 +38,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
 
-### 10. Funzionalità Remote (Client/Server) - v0.70.1
+### 10. Funzionalità Remote (Client/Server) - v0.70.2
 - [x] **Modalità Server (`--server`):** Implementare un'interfaccia di comunicazione su `stdin`/`stdout` per permettere la scansione remota guidata da un client.
 - [x] **Integrazione SSH:** Supporto per percorsi remoti (es. `user@host:/path`) avviando automaticamente il server remoto via SSH.
 - [x] **Streaming della Cache:** Serializzazione efficiente e compressione dei dati di scansione per minimizzare la latenza di rete.
