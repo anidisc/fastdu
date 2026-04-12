@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.70.2"
+#define FASTDU_VERSION "0.71.0"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -187,6 +187,38 @@ static void run_server(const char *root, Cache *cache) {
     
     printf("DONE\n");
     fflush(stdout);
+}
+
+static int parse_remote_uri(const char *uri, char *host, char *rpath) {
+    const char *colon = strchr(uri, ':');
+    if (!colon) return 0;
+    size_t host_len = (size_t)(colon - uri);
+    memcpy(host, uri, host_len);
+    host[host_len] = '\0';
+    strcpy(rpath, colon + 1);
+    return 1;
+}
+
+static char *download_remote_file(const char *abs_path) {
+    char host[256], rpath[PATH_MAX];
+    if (!parse_remote_uri(abs_path, host, rpath)) return NULL;
+    
+    char *tmp_path = "/tmp/fastdu_remote_preview.tmp";
+    char cmd[PATH_MAX + 512];
+    
+    draw_status("Downloading remote file...");
+    refresh();
+    
+    // Usiamo ssh direttamente per fare il cat nel file locale
+    snprintf(cmd, sizeof(cmd), "ssh %s \"cat '%s'\" > %s 2>/dev/null", host, rpath, tmp_path);
+    int rc = system(cmd);
+    
+    if (rc != 0) {
+        draw_status("Failed to download remote file.");
+        return NULL;
+    }
+    
+    return tmp_path;
 }
 
 static void run_client_connect(const char *uri, Cache *cache, int reload_remote) {
@@ -6468,9 +6500,14 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
                 if (ve->is_dir) {
                     draw_status("Preview available only on files");
                 } else {
-                    if (is_textual_file(ve->abs_path) || is_image_file(ve->abs_path)) {
-                        show_preview(ve->abs_path);
-                    } else {
+                    const char *target_path = ve->abs_path;
+                    if (g_is_remote) {
+                        target_path = download_remote_file(ve->abs_path);
+                    }
+                    
+                    if (target_path && (is_textual_file(target_path) || is_image_file(target_path))) {
+                        show_preview(target_path);
+                    } else if (target_path) {
                         draw_status("Not a supported preview format (text/image)");
                     }
                 }
@@ -6489,7 +6526,11 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
         } else if (ch == 'O' || ch == 15) { // Shift+O or Ctrl+O
             if (dv.n > 0) {
                 ViewEntry *ve = &dv.v[dv.selected];
-                open_with_default(ve->abs_path);
+                const char *target_path = ve->abs_path;
+                if (g_is_remote) {
+                    target_path = download_remote_file(ve->abs_path);
+                }
+                if (target_path) open_with_default(target_path);
             }
         } else if (ch == 'o') {
             // cycle sort key (size -> name -> mtime -> extension [-> delta] -> size)
