@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.67.0"
+#define FASTDU_VERSION "0.70.0"
 
 static int g_global_search_mode = 0;
 typedef struct {
@@ -158,6 +158,45 @@ static int g_search_filter = 0; // 0=all, 1=dirs, 2=files
 
 static int g_tree_mode = 0; // Tree view mode toggle
 
+// ------------------------------
+// Remote Protocol & Server
+// ------------------------------
+#define R_MSG_ENTRY 0x01
+#define R_MSG_DONE  0x02
+#define R_MSG_ERROR 0x03
+
+static void run_server(const char *root, Cache *cache) {
+    // In server mode, we emit the entire cache to stdout
+    // Protocol: [1-byte TYPE] [DATA...]
+    
+    for (int i = 0; i < CACHE_SHARDS; i++) {
+        pthread_mutex_lock(&cache->shards[i].mu);
+        for (size_t j = 0; j < cache->shards[i].n; j++) {
+            CacheEntry *e = &cache->shards[i].v[j];
+            
+            uint8_t type = R_MSG_ENTRY;
+            fwrite(&type, 1, 1, stdout);
+            
+            uint32_t abs_len = (uint32_t)strlen(e->abs_path);
+            fwrite(&abs_len, 4, 1, stdout);
+            fwrite(e->abs_path, 1, abs_len, stdout);
+            
+            fwrite(&e->size, 8, 1, stdout);
+            fwrite(&e->ino, 8, 1, stdout);
+            fwrite(&e->dir_mtime, 8, 1, stdout);
+        }
+        pthread_mutex_unlock(&cache->shards[i].mu);
+        fflush(stdout);
+    }
+    
+    uint8_t done = R_MSG_DONE;
+    fwrite(&done, 1, 1, stdout);
+    fflush(stdout);
+    
+    // After sending the initial cache, the server could wait for commands (DELETE, RENAME, etc.)
+    // For now, we just exit after the dump to test the transport.
+}
+
 static void print_cli_usage(void) {
     printf("fastdu %s\n", FASTDU_VERSION);
     printf("Usage:\n");
@@ -169,6 +208,7 @@ static void print_cli_usage(void) {
     printf("  -H, --headless       Force headless (non-TUI) mode\n");
     printf("  -ac, --accuracy      Accurate disk usage: force deep rescan and use allocated blocks (slower)\n");
     printf("  -x, --one-file-system Stay on the same file system (do not cross mount points)\n");
+    printf("  --server [path]      Start in server mode (SSH backend communication)\n");
     printf("  -e PAT, --exclude PAT Exclude files/dirs matching exact PAT\n");
     printf("  --diff FILE          Compare with snapshot cache FILE\n");
     printf("  --export FMT FILE    Export results to FILE in FMT (json|csv) and exit\n");
@@ -5173,6 +5213,7 @@ int main(int argc, char **argv) {
     int jobs_override = 0;
     int show_version = 0;
     int cli_help_flag = 0;
+    int server_mode = 0;
     const char *path_arg = NULL;
     int headless_flag = 0;
     const char *export_format = NULL;
@@ -5181,6 +5222,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-R") == 0 || strcmp(argv[i], "--reload") == 0) {
             reload_flag = 1;
+        } else if (strcmp(argv[i], "--server") == 0) {
+            server_mode = 1;
         } else if (strcmp(argv[i], "--diff") == 0) {
             if (i + 1 < argc) snapshot_file = argv[++i];
         } else if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exclude") == 0) {
@@ -5360,6 +5403,14 @@ fprintf(stderr, "Invalid path: %s (%s)\n", root_in, strerror(errno));
         cache_get_info(&cache, root, &rs, NULL, NULL);
         g_last_bytes = rs;
         // totals_files is already set by cache_load parsing (version 3 or row counting)
+    }
+
+    if (server_mode) {
+        run_server(root, &cache);
+        cache_free(&cache);
+        cache_free(&g_snapshot_cache);
+        free(cache_abs);
+        return 0;
     }
 
     if (headless) {
