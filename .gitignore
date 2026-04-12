@@ -16,6 +16,10 @@ fastdu
 .DS_Store
 Thumbs.db
 
+# Test files
+test/
+testlab/
+
 # Project caches
 .fastdu_cache_v*
 .cache/
@@ -26,3 +30,4 @@ gdu/
 
 # Website (local landing page)
 html/
+remote_feat.html

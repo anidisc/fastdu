@@ -32,11 +32,17 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 ...
 ### 9. Gestione File Avanzata (Next Goals)
 - [x] **Creazione Rapida (Ctrl+n / ALT+n):** Tasto `Ctrl+n` per creare una nuova cartella (`mkdir`) e `ALT+n` per un nuovo file vuoto (`touch`).
-- [ ] **Ricerca Globale Istantanea:** Sfruttare la cache per cercare file in tutto l'albero scansionato, non solo nella cartella corrente.
-- [ ] **Ordinamento Avanzato (o):** Cicliare l'ordinamento tra Dimensione, Nome, Data di modifica ed Estensione.
+- [x] **Ricerca Globale Istantanea:** Sfruttare la cache per cercare file in tutto l'albero scansionato, non solo nella cartella corrente.
+- [x] **Ordinamento Avanzato (o):** Cicliare l'ordinamento tra Dimensione, Nome, Data di modifica ed Estensione.
 
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
+
+### 10. Funzionalità Remote (Client/Server)
+- [ ] **Modalità Server (`--server`):** Implementare un'interfaccia di comunicazione su `stdin`/`stdout` per permettere la scansione remota guidata da un client.
+- [ ] **Integrazione SSH:** Supporto per percorsi remoti (es. `user@host:/path`) avviando automaticamente il server remoto via SSH.
+- [ ] **Streaming della Cache:** Serializzazione efficiente e compressione dei dati di scansione per minimizzare la latenza di rete.
+- [ ] **Operazioni Remote:** Permettere cancellazione, rinomina e spostamento di file sul server remoto tramite comandi inviati dal client.
 
 ### 6. Motore & Performance (Ottimizzazione Core)
 - [x] **Integrazione `io_uring`:** Su Linux, utilizzare `io_uring` per le operazioni di `stat` e `openat` per ridurre l'overhead delle syscall durante la scansione parallela.
