@@ -138,7 +138,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.73.2"
+#define FASTDU_VERSION "0.75.0"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -231,6 +231,38 @@ static void handle_remote_command(const char *cmd, const char *root, int argc, c
             printf("ERROR rename failed: %s\n", strerror(errno));
         }
         cache_free(&cache);
+    } else if (strcmp(cmd, "mkdir") == 0) {
+        if (argc < 1) { printf("ERROR missing name\n"); return; }
+        const char *target = argv[0];
+        if (mkdir(target, 0755) == 0) {
+            Cache cache; cache_init(&cache);
+            if (cache_load(root, &cache) > 0) {
+                struct stat st;
+                if (lstat(target, &st) == 0) {
+                    cache_upsert_with_meta(&cache, root, target, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                    cache_save(root, &cache);
+                }
+            }
+            cache_free(&cache);
+            printf("OK\n");
+        } else { printf("ERROR mkdir failed\n"); }
+    } else if (strcmp(cmd, "touch") == 0) {
+        if (argc < 1) { printf("ERROR missing name\n"); return; }
+        const char *target = argv[0];
+        int fd = creat(target, 0644);
+        if (fd >= 0) {
+            close(fd);
+            Cache cache; cache_init(&cache);
+            if (cache_load(root, &cache) > 0) {
+                struct stat st;
+                if (lstat(target, &st) == 0) {
+                    cache_upsert_with_meta(&cache, root, target, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                    cache_save(root, &cache);
+                }
+            }
+            cache_free(&cache);
+            printf("OK\n");
+        } else { printf("ERROR touch failed\n"); }
     } else {
         printf("ERROR unknown command\n");
     }
@@ -360,6 +392,30 @@ static int remote_rename(const char *old_abs, const char *new_abs) {
     }
     pclose(fp);
     return -1;
+}
+
+static int remote_mkdir(const char *target_abs) {
+    char host[256], rpath[PATH_MAX];
+    if (!parse_remote_uri(target_abs, host, rpath)) return -1;
+    char cmd[PATH_MAX + 512];
+    if (g_ssh_socket[0] != '\0') snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"fastdu --remote-cmd mkdir '%s' '%s'\"", g_ssh_socket, host, g_server_root, rpath);
+    else snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd mkdir '%s' '%s'\"", host, g_server_root, rpath);
+    FILE *fp = popen(cmd, "r"); if (!fp) return -1;
+    char res[64] = "";
+    if (fgets(res, sizeof(res), fp) && strncmp(res, "OK", 2) == 0) { pclose(fp); return 0; }
+    pclose(fp); return -1;
+}
+
+static int remote_touch(const char *target_abs) {
+    char host[256], rpath[PATH_MAX];
+    if (!parse_remote_uri(target_abs, host, rpath)) return -1;
+    char cmd[PATH_MAX + 512];
+    if (g_ssh_socket[0] != '\0') snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"fastdu --remote-cmd touch '%s' '%s'\"", g_ssh_socket, host, g_server_root, rpath);
+    else snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd touch '%s' '%s'\"", host, g_server_root, rpath);
+    FILE *fp = popen(cmd, "r"); if (!fp) return -1;
+    char res[64] = "";
+    if (fgets(res, sizeof(res), fp) && strncmp(res, "OK", 2) == 0) { pclose(fp); return 0; }
+    pclose(fp); return -1;
 }
 
 static void run_client_connect(const char *uri, Cache *cache, int reload_remote) {
@@ -5997,15 +6053,26 @@ int main(int argc, char **argv) {
                             if (path_exists(abs)) {
                                 draw_status("File already exists!");
                             } else {
-                                int fd = creat(abs, 0644);
-                                if (fd >= 0) {
-                                    close(fd);
-                                    struct stat st;
-                                    if (lstat(abs, &st) == 0) {
-                                        cache_upsert_with_meta(&g_cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
-                                        cache_add_ancestors_after_delta(&g_cache, root, abs, 0);
-                                        g_last_files++;
+                                int rc = -1;
+                                if (g_is_remote) {
+                                    rc = remote_touch(abs);
+                                } else {
+                                    int fd = creat(abs, 0644);
+                                    if (fd >= 0) { close(fd); rc = 0; }
+                                }
+
+                                if (rc == 0) {
+                                    if (g_is_remote) {
+                                        // Simula entry in cache locale
+                                        cache_upsert_with_meta(&g_cache, root, abs, 0, time(NULL), 0ULL, time(NULL));
+                                    } else {
+                                        struct stat st;
+                                        if (lstat(abs, &st) == 0) {
+                                            cache_upsert_with_meta(&g_cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                                        }
                                     }
+                                    cache_add_ancestors_after_delta(&g_cache, root, abs, 0);
+                                    g_last_files++;
                                     view_free(&dv);
                                     build_dir_view(current, root, &g_cache, &dv);
                                     for(size_t i=0; i<dv.n; i++) { if (strcmp(dv.v[i].abs_path, abs) == 0) { dv.selected = i; break; } }
@@ -6015,6 +6082,7 @@ int main(int argc, char **argv) {
                                     draw_status("Failed to create file.");
                                 }
                             }
+
                             free(abs);
                         }
                     }
@@ -6037,10 +6105,22 @@ int main(int argc, char **argv) {
                         if (path_exists(abs)) {
                             draw_status("Folder already exists!");
                         } else {
-                            if (mkdir(abs, 0755) == 0) {
-                                struct stat st;
-                                if (lstat(abs, &st) == 0) {
-                                    cache_upsert_with_meta(&g_cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                            int rc = -1;
+                            if (g_is_remote) {
+                                rc = remote_mkdir(abs);
+                            } else {
+                                rc = mkdir(abs, 0755);
+                            }
+
+                            if (rc == 0) {
+                                if (g_is_remote) {
+                                    // Simula entry in cache locale
+                                    cache_upsert_with_meta(&g_cache, root, abs, 0, time(NULL), 1, time(NULL));
+                                } else {
+                                    struct stat st;
+                                    if (lstat(abs, &st) == 0) {
+                                        cache_upsert_with_meta(&g_cache, root, abs, 0, time(NULL), (unsigned long long)st.st_ino, st.st_mtime);
+                                    }
                                 }
                                 view_free(&dv);
                                 build_dir_view(current, root, &g_cache, &dv);
