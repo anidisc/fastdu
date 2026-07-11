@@ -1,12 +1,12 @@
-# Roadmap di Sviluppo: fastdu
+# Roadmap di Sviluppo: qdux
 
-Questo documento delinea le proposte per l'introduzione di nuove funzionalità e le correzioni necessarie per rendere `fastdu` più robusto, preciso e versatile.
+Questo documento delinea le proposte per l'introduzione di nuove funzionalità e le correzioni necessarie per rendere `qdux` più robusto, preciso e versatile.
 
 ## 🚀 Nuove Funzionalità (Feature Request)
 
 ### 1. Sistema di Esclusione Avanzato
 Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
-- [x] **Supporto file `.fastduignore`:** Implementare la lettura di un file di configurazione (stile `.gitignore`) per saltare directory pesanti ma irrilevanti (es. `node_modules`, `.git`, `cache`).
+- [x] **Supporto file `.qduxignore`:** Implementare la lettura di un file di configurazione (stile `.gitignore`) per saltare directory pesanti ma irrilevanti (es. `node_modules`, `.git`, `cache`).
 - [x] **Flag `--exclude`:** Aggiungere un'opzione da riga di comando per escludere pattern specifici durante la scansione.
 
 ### 2. Visualizzazione Grafica (TUI Enhancements)
@@ -36,7 +36,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Ordinamento Avanzato (o):** Cicliare l'ordinamento tra Dimensione, Nome, Data di modifica ed Estensione.
 
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
-- [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/fastdu/config.toml`.
+- [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/qdux/config.toml`.
 
 ### 10. Funzionalità Remote (Client/Server) - v0.75.0
 - [x] **Creazione Remota (Ctrl+n / ALT+n):** Supporto per la creazione di nuove cartelle e file vuoti sul server con sincronizzazione immediata della cache locale.
@@ -79,7 +79,7 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [ ] **Gestione Path Lunghi:** Sebbene usi `PATH_MAX`, alcuni filesystem moderni o directory annidate possono superare questo limite. Valutare l'uso di percorsi dinamici o un uso più esteso di `openat()`.
 
 ### 3. Scalabilità della Cache
-- [ ] **Lazy Loading della Cache:** Invece di caricare l'intero file `.fastdu_cache_v2` all'avvio (che può essere lento per milioni di entry), implementare un caricamento "on-demand" delle sottocartelle o usare un database leggero come **SQLite**.
+- [ ] **Lazy Loading della Cache:** Invece di caricare l'intero file `.qdux_cache_v2` all'avvio (che può essere lento per milioni di entry), implementare un caricamento "on-demand" delle sottocartelle o usare un database leggero come **SQLite**.
 - [ ] **Compressione della Cache:** I percorsi testuali ripetuti occupano molto spazio su disco. Valutare una compressione semplice (es. zstd) per il file di cache.
 
 ### 4. Concorrenza e Threading

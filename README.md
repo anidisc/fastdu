@@ -1,4 +1,4 @@
-# fastdu
+# qdux
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
@@ -27,14 +27,14 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **Full Mouse Support**: Selection, double-click to enter, right-click to go back, and scroll wheel support.
 - **Navigable Breadcrumbs**: Clickable path in the header for instant navigation to parent directories.
 - **Nerd Fonts Integration**: Visual icons for folders and files (requires a Nerd Font and `-nf` flag).
-- **Customizable TUI**: Colors and themes via `~/.config/fastdu/config.toml`.
+- **Customizable TUI**: Colors and themes via `~/.config/qdux/config.toml`.
 - **Instant Cache Loading**: Eliminated redundant disk walks during cache loading. Even massive cache files are now parsed instantly.
 - **Cache Progress Bar**: Visual feedback during the cache loading phase, showing real-time progress for large datasets.
 - **Ultra-Fluid Scrolling**: Optimized TUI rendering engine with cached metrics, providing instant response even in directories with 100,000+ files.
 - **Sharded Cache**: Performance-optimized cache with 64 independent locks to minimize thread contention.
 - **Hard Link Detection**: Accurate disk usage calculation by counting unique (dev, ino) pairs only once.
 - **Iterative Operations**: Tree removal and copying are now iterative, supporting extremely deep directory structures without stack overflow.
-- **Advanced Exclusions**: Support for `.fastduignore` files and `--exclude` CLI flag.
+- **Advanced Exclusions**: Support for `.qduxignore` files and `--exclude` CLI flag.
 - **Extension Analysis**: Dedicated view to analyze space distribution by file extension (Press `E`).
 - **Data Export**: Export scan results to JSON or CSV formats for external analysis.
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
@@ -56,7 +56,7 @@ Leverage the power of the in-memory cache to find anything, anywhere.
 ## What’s new in 0.64.0 (Quick Creation)
 
 ### 📁 Create Files & Folders
-You can now create new items without leaving **fastdu**.
+You can now create new items without leaving **qdux**.
 - **Folders**: Press `Ctrl+n` to create a new directory.
 - **Files**: Press `ALT+n` to create a new empty file.
 - **Interactive**: Integrated prompts with full line editing support.
@@ -67,10 +67,10 @@ You can now create new items without leaving **fastdu**.
 ## What’s new in 0.63.0 (Subshell Access)
 
 ### 🐚 Instant Shell Access
-You can now jump to your terminal's shell without losing your place in **fastdu**.
+You can now jump to your terminal's shell without losing your place in **qdux**.
 - **Context Aware**: The shell opens exactly in the directory you are currently browsing.
 - **Seamless Flow**: Press `Ctrl+S` to drop to shell, type `exit` or `Ctrl+D` to return to exactly where you were.
-- **Auto-Sync**: When you return, **fastdu** automatically refreshes the current view to reflect any changes made in the shell.
+- **Auto-Sync**: When you return, **qdux** automatically refreshes the current view to reflect any changes made in the shell.
 
 ---
 
@@ -109,7 +109,7 @@ Extract compressed files with full control.
 ## What’s new in 0.59.0 (Zip Compression)
 
 ### 🤐 Built-in Compression
-You can now create `.zip` archives directly within **fastdu**.
+You can now create `.zip` archives directly within **qdux**.
 - **Context Aware**: Compresses marked items if any, otherwise the selected item (Press `z`).
 - **Interactive**: Prompt for archive name before starting.
 - **Conflict Management**: Detects if the target zip already exists and asks for overwrite or rename.
@@ -120,7 +120,7 @@ You can now create `.zip` archives directly within **fastdu**.
 ## What’s new in 0.58.0 (Editor Integration)
 
 ### 📝 External Editor support
-You can now edit files without leaving **fastdu**.
+You can now edit files without leaving **qdux**.
 - **Quick Edit**: Press `Ctrl+E` on any file to open it in your preferred editor.
 - **Customizable**: Set your editor in `config.toml` (e.g., `editor = "nvim"`) or rely on the `$EDITOR` environment variable.
 - **Seamless Transition**: The TUI suspends while you edit and resumes exactly where you left off.
@@ -236,7 +236,7 @@ Instantly change the look of the TUI.
 
 ## Configuration
 
-You can customize **fastdu** colors by creating a file at `~/.config/fastdu/config.toml`.
+You can customize **qdux** colors by creating a file at `~/.config/qdux/config.toml`.
 
 ```toml
 # Supported colors: black, red, green, yellow, blue, magenta, cyan, white
@@ -277,14 +277,14 @@ size_l_fg = "red"     # Large files
 make
 ```
 
-Produces the `./fastdu` binary.
+Produces the `./qdux` binary.
 
 ---
 
 ## Usage
 
 ```bash
-./fastdu [options] [path]
+./qdux [options] [path]
 ```
 
 ### Options

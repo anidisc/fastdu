@@ -1,5 +1,5 @@
 # Build artifacts
-fastdu
+qdux
 *.o
 *.a
 *.so
@@ -21,7 +21,7 @@ test/
 testlab/
 
 # Project caches
-.fastdu_cache_v*
+.qdux_cache_v*
 .cache/
 
 # Build directories

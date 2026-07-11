@@ -1,6 +1,6 @@
 CC = gcc
-TARGET = fastdu
-SRC = fastdu.c
+TARGET = qdux
+SRC = qdux.c
 
 # Detect if we are on a Raspberry Pi
 IS_RPI := $(shell grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null && echo yes || echo no)

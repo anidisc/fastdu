@@ -1,5 +1,5 @@
-# fastdu Configuration Example
-# Copy this file to ~/.config/fastdu/config.toml to apply changes.
+# qdux Configuration Example
+# Copy this file to ~/.config/qdux/config.toml to apply changes.
 
 # ---------------------------------------------------------
 # THEME PRESETS
@@ -38,7 +38,7 @@ theme = "dracula"
 # EXTERNAL EDITOR
 # ---------------------------------------------------------
 # Specify your preferred editor for Ctrl+E shortcut.
-# If not set, fastdu will use $EDITOR or a system default (vim/nano).
+# If not set, qdux will use $EDITOR or a system default (vim/nano).
 #
 # editor = "nvim"
 
@@ -46,7 +46,7 @@ theme = "dracula"
 # FILE ASSOCIATIONS (Open with Ctrl+O)
 # ---------------------------------------------------------
 # Map file extensions to specific commands.
-# If an extension is not defined here, fastdu will use the system's
+# If an extension is not defined here, qdux will use the system's
 # default handler (xdg-open on Linux, open on macOS).
 #
 # Format: [associations]

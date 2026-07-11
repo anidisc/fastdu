@@ -1,11 +1,11 @@
 /*
- * fastdu — A fast, TUI-based disk usage explorer (ncurses + pthreads)
+ * qdux — A fast, TUI-based disk usage explorer (ncurses + pthreads)
  *
  * Overview
  * --------
- * fastdu provides a terminal UI to explore directory sizes quickly.
+ * qdux provides a terminal UI to explore directory sizes quickly.
  * It scans directories in parallel using a deep work queue and caches
- * results to a TSV-like file (.fastdu_cache_v2) at the scan root to
+ * results to a TSV-like file (.qdux_cache_v2) at the scan root to
  * avoid rescanning unchanged directories. The TUI displays a sortable
  * list (by size or name), supports filtering, incremental find, marks
  * for bulk operations, and live progress during scans.
@@ -137,8 +137,8 @@ static void cache_add_ancestors_after_delta(Cache *c, const char *root, const ch
 static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
-#define CACHE_FILENAME ".fastdu_cache_v3"
-#define FASTDU_VERSION "0.75.0"
+#define CACHE_FILENAME ".qdux_cache_v3"
+#define QDUX_VERSION "0.75.0"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -315,7 +315,7 @@ static char *download_remote_file(const char *abs_path) {
     char host[256], rpath[PATH_MAX];
     if (!parse_remote_uri(abs_path, host, rpath)) return NULL;
     
-    char *tmp_path = "/tmp/fastdu_remote_preview.tmp";
+    char *tmp_path = "/tmp/qdux_remote_preview.tmp";
     char cmd[PATH_MAX + 512];
     
     draw_status("Downloading remote file (via multiplex)...");
@@ -344,10 +344,10 @@ static int remote_delete(const char *target_abs) {
     char cmd[PATH_MAX + 512];
     // Sintassi server: --remote-cmd delete <root> <target>
     if (g_ssh_socket[0] != '\0') {
-        snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"fastdu --remote-cmd delete '%s' '%s'\"", 
+        snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"qdux --remote-cmd delete '%s' '%s'\"", 
                  g_ssh_socket, host, g_server_root, rpath);
     } else {
-        snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd delete '%s' '%s'\"", 
+        snprintf(cmd, sizeof(cmd), "ssh %s \"qdux --remote-cmd delete '%s' '%s'\"", 
                  host, g_server_root, rpath);
     }
     
@@ -373,10 +373,10 @@ static int remote_rename(const char *old_abs, const char *new_abs) {
     char cmd[PATH_MAX * 2 + 512];
     // Sintassi server: --remote-cmd rename <root> <old_path> <new_path>
     if (g_ssh_socket[0] != '\0') {
-        snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"fastdu --remote-cmd rename '%s' '%s' '%s'\"", 
+        snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"qdux --remote-cmd rename '%s' '%s' '%s'\"", 
                  g_ssh_socket, host, g_server_root, old_rpath, new_rpath);
     } else {
-        snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd rename '%s' '%s' '%s'\"", 
+        snprintf(cmd, sizeof(cmd), "ssh %s \"qdux --remote-cmd rename '%s' '%s' '%s'\"", 
                  host, g_server_root, old_rpath, new_rpath);
     }
     
@@ -398,8 +398,8 @@ static int remote_mkdir(const char *target_abs) {
     char host[256], rpath[PATH_MAX];
     if (!parse_remote_uri(target_abs, host, rpath)) return -1;
     char cmd[PATH_MAX + 512];
-    if (g_ssh_socket[0] != '\0') snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"fastdu --remote-cmd mkdir '%s' '%s'\"", g_ssh_socket, host, g_server_root, rpath);
-    else snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd mkdir '%s' '%s'\"", host, g_server_root, rpath);
+    if (g_ssh_socket[0] != '\0') snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"qdux --remote-cmd mkdir '%s' '%s'\"", g_ssh_socket, host, g_server_root, rpath);
+    else snprintf(cmd, sizeof(cmd), "ssh %s \"qdux --remote-cmd mkdir '%s' '%s'\"", host, g_server_root, rpath);
     FILE *fp = popen(cmd, "r"); if (!fp) return -1;
     char res[64] = "";
     if (fgets(res, sizeof(res), fp) && strncmp(res, "OK", 2) == 0) { pclose(fp); return 0; }
@@ -410,8 +410,8 @@ static int remote_touch(const char *target_abs) {
     char host[256], rpath[PATH_MAX];
     if (!parse_remote_uri(target_abs, host, rpath)) return -1;
     char cmd[PATH_MAX + 512];
-    if (g_ssh_socket[0] != '\0') snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"fastdu --remote-cmd touch '%s' '%s'\"", g_ssh_socket, host, g_server_root, rpath);
-    else snprintf(cmd, sizeof(cmd), "ssh %s \"fastdu --remote-cmd touch '%s' '%s'\"", host, g_server_root, rpath);
+    if (g_ssh_socket[0] != '\0') snprintf(cmd, sizeof(cmd), "ssh -S %s %s \"qdux --remote-cmd touch '%s' '%s'\"", g_ssh_socket, host, g_server_root, rpath);
+    else snprintf(cmd, sizeof(cmd), "ssh %s \"qdux --remote-cmd touch '%s' '%s'\"", host, g_server_root, rpath);
     FILE *fp = popen(cmd, "r"); if (!fp) return -1;
     char res[64] = "";
     if (fgets(res, sizeof(res), fp) && strncmp(res, "OK", 2) == 0) { pclose(fp); return 0; }
@@ -424,13 +424,13 @@ static void run_client_connect(const char *uri, Cache *cache, int reload_remote)
     if (!parse_remote_uri(uri, host, rpath)) return;
 
     // Prepara il socket per il multiplexing
-    snprintf(g_ssh_socket, sizeof(g_ssh_socket), "/tmp/fastdu-ssh-%u.sock", (unsigned int)getpid());
+    snprintf(g_ssh_socket, sizeof(g_ssh_socket), "/tmp/qdux-ssh-%u.sock", (unsigned int)getpid());
     atexit(cleanup_ssh_multiplex);
 
     char ssh_cmd[PATH_MAX + 512];
     // Avviamo la connessione master con ControlMaster=yes
     snprintf(ssh_cmd, sizeof(ssh_cmd), 
-             "ssh -M -S %s -o ControlPersist=60 %s \"fastdu --server %s %s\"", 
+             "ssh -M -S %s -o ControlPersist=60 %s \"qdux --server %s %s\"", 
              g_ssh_socket, host, rpath, reload_remote ? "-R" : "");
     
     FILE *pipe = popen(ssh_cmd, "r");
@@ -489,15 +489,15 @@ static void run_client_connect(const char *uri, Cache *cache, int reload_remote)
 }
 
 static void print_cli_usage(void) {
-    printf("fastdu %s\n", FASTDU_VERSION);
+    printf("qdux %s\n", QDUX_VERSION);
     printf("Usage:\n");
-    printf("  fastdu [options] [path]\n\n");
+    printf("  qdux [options] [path]\n\n");
     printf("Options:\n");
     printf("  -h, --help           Show this help and exit\n");
     printf("  -v, --version        Show version and exit\n");
     printf("  -R, --reload         Ignore cache and perform full rescan\n");
     printf("  --server [path]      Start in server mode (SSH backend)\n");
-    printf("  --connect URI        Connect to remote fastdu (user@host:/path)\n");
+    printf("  --connect URI        Connect to remote qdux (user@host:/path)\n");
     printf("  -H, --headless       Forced headless mode (no TUI)\n");
 
     printf("  -ac, --accuracy      Accurate disk usage: force deep rescan and use allocated blocks (slower)\n");
@@ -509,10 +509,10 @@ static void print_cli_usage(void) {
     printf("  -nf, --nerd-fonts    Enable Nerd Fonts icons support (requires compatible font)\n");
     printf("  -j N, --jobs N       Number of worker threads (default: CPUs, max 64)\n\n");
     printf("Examples:\n");
-    printf("  fastdu                 # open TUI on current directory\n");
-    printf("  fastdu -R /data        # full reload of /data, then open TUI\n");
-    printf("  fastdu -j 8 /data      # use 8 workers\n");
-    printf("  fastdu -v              # print version\n");
+    printf("  qdux                 # open TUI on current directory\n");
+    printf("  qdux -R /data        # full reload of /data, then open TUI\n");
+    printf("  qdux -j 8 /data      # use 8 workers\n");
+    printf("  qdux -v              # print version\n");
 }
 
 // ------------------------------
@@ -665,7 +665,7 @@ static void load_config_file(void) {
     const char *home = getenv("HOME");
     if (!home) return;
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/.config/fastdu/config.toml", home);
+    snprintf(path, sizeof(path), "%s/.config/qdux/config.toml", home);
     FILE *f = fopen(path, "r");
     if (!f) return;
 
@@ -937,8 +937,8 @@ static void exclude_free(void) {
     g_excludes.patterns = NULL; g_excludes.n = g_excludes.cap = 0;
 }
 
-static void load_fastduignore(const char *root) {
-    char *p = path_join(root, ".fastduignore");
+static void load_qduxignore(const char *root) {
+    char *p = path_join(root, ".qduxignore");
     if (!p) return;
     FILE *f = fopen(p, "r");
     free(p);
@@ -1376,7 +1376,7 @@ static int cache_save(const char *root, const Cache *c) {
         off += _len; \
     } while(0)
 
-    APPEND_BUF("# fastdu-cache v3\n");
+    APPEND_BUF("# qdux-cache v3\n");
     APPEND_BUF("root\t%s\n", root);
     
     unsigned long long total_bytes = 0ULL;
@@ -1579,9 +1579,9 @@ static int cache_load_file(const char *cache_path_in, const char *root, Cache *c
         if (line_len == 0) continue;
 
         if (!header_ok) {
-            if (strncmp(line_buf, "# fastdu-cache v3", 17) == 0) { header_ok = 1; version = 3; }
-            else if (strncmp(line_buf, "# fastdu-cache v2", 17) == 0) { header_ok = 1; version = 2; }
-            else if (strncmp(line_buf, "# fastdu-cache v1", 17) == 0) { header_ok = 1; version = 1; }
+            if (strncmp(line_buf, "# qdux-cache v3", 17) == 0) { header_ok = 1; version = 3; }
+            else if (strncmp(line_buf, "# qdux-cache v2", 17) == 0) { header_ok = 1; version = 2; }
+            else if (strncmp(line_buf, "# qdux-cache v1", 17) == 0) { header_ok = 1; version = 1; }
             continue;
         }
 
@@ -2934,7 +2934,23 @@ static int zip_compress_items(char **src_paths, size_t num_src, const char *dest
                         char *abs = path_join(list[i].abs, de->d_name);
                         char *rel = path_join(list[i].rel, de->d_name);
                         if (abs && rel) {
-                            if (n == cap) { cap *= 2; list = realloc(list, cap * sizeof(ZipTask)); }
+                            if (n == cap) {
+                                size_t newcap = cap * 2;
+                                ZipTask *newlist = realloc(list, newcap * sizeof(ZipTask));
+                                if (!newlist) {
+                                    free(abs);
+                                    free(rel);
+                                    for (size_t k = 0; k < n; k++) {
+                                        free(list[k].abs);
+                                        free(list[k].rel);
+                                    }
+                                    free(list);
+                                    archive_write_free(a);
+                                    return -1;
+                                }
+                                list = newlist;
+                                cap = newcap;
+                            }
                             list[n++] = (ZipTask){abs, rel};
                         } else { free(abs); free(rel); }
                     }
@@ -3018,7 +3034,22 @@ static int copy_tree_with_progress(const char *src, const char *dst, CopyUI *ui,
                         char *cs = path_join(list[i].src, de->d_name);
                         char *cd = path_join(list[i].dst, de->d_name);
                         if (cs && cd) {
-                            if (n == cap) { cap *= 2; list = realloc(list, cap * sizeof(CopyTask)); }
+                            if (n == cap) {
+                                size_t newcap = cap * 2;
+                                CopyTask *newlist = realloc(list, newcap * sizeof(CopyTask));
+                                if (!newlist) {
+                                    free(cs);
+                                    free(cd);
+                                    for (size_t k = 0; k < n; k++) {
+                                        free(list[k].src);
+                                        free(list[k].dst);
+                                    }
+                                    free(list);
+                                    return -1;
+                                }
+                                list = newlist;
+                                cap = newcap;
+                            }
                             list[n++] = (CopyTask){cs, cd};
                         } else { free(cs); free(cd); }
                     }
@@ -3069,7 +3100,7 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
 
     // --- Line 0: Main Header ---
     move(0, 0);
-    attron(COLOR_PAIR(1)); addstr(" fastdu ");
+    attron(COLOR_PAIR(1)); addstr(" qdux ");
     attron(A_NORMAL); addstr(" - root: ");
     attron(COLOR_PAIR(8) | A_BOLD); addstr(root);
     attron(COLOR_PAIR(1)); addstr(" - cwd: ");
@@ -3164,7 +3195,7 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
 
     // --- Theme & Version info at the far right of the Footer ---
     char info_right[64];
-    snprintf(info_right, sizeof(info_right), " %s T:[%s] ", FASTDU_VERSION, g_themes[g_current_theme_idx]);
+    snprintf(info_right, sizeof(info_right), " %s T:[%s] ", QDUX_VERSION, g_themes[g_current_theme_idx]);
     int tw = (int)strlen(info_right);
     if (cols > tw + 40) {
         attron(COLOR_PAIR(1));
@@ -4057,8 +4088,8 @@ static void launch_subshell(const char *path) {
     def_prog_mode();
     endwin();
     
-    printf("\n[fastdu] Dropping to subshell in: %s\n", path);
-    printf("[fastdu] Type 'exit' or press Ctrl-D to return to fastdu.\n\n");
+    printf("\n[qdux] Dropping to subshell in: %s\n", path);
+    printf("[qdux] Type 'exit' or press Ctrl-D to return to qdux.\n\n");
     fflush(stdout);
 
     if (chdir(path) == 0) {
@@ -4398,10 +4429,10 @@ static void show_help(void) {
         "  h - this help",
         "",
         "CLI:",
-        "  fastdu [-R] [-x] [-e PAT] [-j N] [--export FMT FILE] [path]",
+        "  qdux [-R] [-x] [-e PAT] [-j N] [--export FMT FILE] [path]",
         "",
         "Version:",
-        "  fastdu v" FASTDU_VERSION,
+        "  qdux v" QDUX_VERSION,
         NULL
     };
 
@@ -4417,7 +4448,7 @@ static void show_help(void) {
         // Title
         wattron(win, A_REVERSE | A_BOLD);
         char title[128];
-        snprintf(title, sizeof(title), " fastdu v%s - Help ", FASTDU_VERSION);
+        snprintf(title, sizeof(title), " qdux v%s - Help ", QDUX_VERSION);
         mvwaddnstr(win, 0, 2, title, w - 4);
         wattroff(win, A_REVERSE | A_BOLD);
         // Content area
@@ -5447,7 +5478,15 @@ static void *finalizer_loop(void *arg) {
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads) {
     ScanPool p; tq_init(&p.q, 16384); tq_init(&p.finq, 16384);
     inodeset_init(&p.is, 65536);
-    p.threads = threads; p.th = malloc((size_t)threads * sizeof(pthread_t)); wg_init(&p.wg);
+    p.threads = threads;
+    p.th = malloc((size_t)threads * sizeof(pthread_t));
+    if (!p.th) {
+        tq_destroy(&p.q);
+        tq_destroy(&p.finq);
+        inodeset_free(&p.is);
+        return 0ULL;
+    }
+    wg_init(&p.wg);
     // start workers and finalizer
     for (int i = 0; i < threads; i++) pthread_create(&p.th[i], NULL, worker_loop, &p);
     pthread_create(&p.fin_th, NULL, finalizer_loop, &p);
@@ -5457,9 +5496,46 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     atomic_store(&g_total_files, 0ULL);
     atomic_store(&g_total_bytes, 0ULL);
     int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) { tq_close(&p.q); for (int i = 0; i < threads; i++) pthread_join(p.th[i], NULL); tq_destroy(&p.q); free(p.th); inodeset_free(&p.is); return 0ULL; }
+    if (fd < 0) {
+        tq_close(&p.q);
+        for (int i = 0; i < threads; i++) pthread_join(p.th[i], NULL);
+        tq_close(&p.finq);
+        pthread_join(p.fin_th, NULL);
+        tq_destroy(&p.q);
+        tq_destroy(&p.finq);
+        free(p.th);
+        inodeset_free(&p.is);
+        return 0ULL;
+    }
     DirTask *rt = malloc(sizeof(DirTask));
-    rt->dirfd = fd; rt->abs_path = xstrdup(root); rt->root = root; rt->cache_abs = cache_abs; rt->cache = cache; rt->parent = NULL;
+    if (!rt) {
+        close(fd);
+        tq_close(&p.q);
+        for (int i = 0; i < threads; i++) pthread_join(p.th[i], NULL);
+        tq_close(&p.finq);
+        pthread_join(p.fin_th, NULL);
+        tq_destroy(&p.q);
+        tq_destroy(&p.finq);
+        free(p.th);
+        inodeset_free(&p.is);
+        return 0ULL;
+    }
+    rt->dirfd = fd;
+    rt->abs_path = xstrdup(root);
+    if (!rt->abs_path) {
+        free(rt);
+        close(fd);
+        tq_close(&p.q);
+        for (int i = 0; i < threads; i++) pthread_join(p.th[i], NULL);
+        tq_close(&p.finq);
+        pthread_join(p.fin_th, NULL);
+        tq_destroy(&p.q);
+        tq_destroy(&p.finq);
+        free(p.th);
+        inodeset_free(&p.is);
+        return 0ULL;
+    }
+    rt->root = root; rt->cache_abs = cache_abs; rt->cache = cache; rt->parent = NULL;
     rt->is = &p.is;
     atomic_store(&rt->files_size, 0ULL); atomic_store(&rt->children_size, 0ULL);
     // Initialize pending to 1 (self processing), children will add more
@@ -5469,11 +5545,11 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
     wg_add(&p.wg, 1);
     tq_push(&p.q, rt);
 
-    // Progress loop with optional stall monitor (enabled if FASTDU_DEBUG_SCAN=1 or headless)
+    // Progress loop with optional stall monitor (enabled if QDUX_DEBUG_SCAN=1 or headless)
     ScanUI ui = { .enabled = (g_tui_active ? 1 : 0), .count = 0, .phase = "Scanning" };
     clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
     struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 50 * 1000 * 1000; // 50ms
-    const char *dbg = getenv("FASTDU_DEBUG_SCAN");
+    const char *dbg = getenv("QDUX_DEBUG_SCAN");
     unsigned long long last_prog = 0ULL; time_t last_prog_ts = time(NULL);
     while (wg_value(&p.wg) > 0) {
         ui.count = atomic_load(&g_progress_count);
@@ -5487,7 +5563,7 @@ static unsigned long long scan_dir_parallel_deep(const char *root, const char *c
             time_t now = time(NULL);
             if ((dbg || !ui.enabled) && now - last_prog_ts >= 20) {
                 // print a heartbeat to stderr every 20s without progress
-                fprintf(stderr, "[fastdu] stall? cnt=%llu active=%d wg=%d q=%zu/%zu finq=%zu/%zu files=%llu bytes=%llu path=%s\n",
+                fprintf(stderr, "[qdux] stall? cnt=%llu active=%d wg=%d q=%zu/%zu finq=%zu/%zu files=%llu bytes=%llu path=%s\n",
                         (unsigned long long)ui.count, ui.active, ui.pending,
                         (size_t)tq_count(&p.q), (size_t)tq_capacity(&p.q),
                         (size_t)tq_count(&p.finq), (size_t)tq_capacity(&p.finq),
@@ -5542,7 +5618,7 @@ static void crash_handler(int sig) {
         endwin();
         g_tui_active = 0;
     }
-    const char msg[] = "\nfastdu: restored terminal after signal.\n";
+    const char msg[] = "\nqdux: restored terminal after signal.\n";
     (void)write(STDERR_FILENO, msg, sizeof(msg)-1);
     struct sigaction sa; memset(&sa, 0, sizeof(sa));
     sa.sa_handler = SIG_DFL; sigemptyset(&sa.sa_mask);
@@ -5585,7 +5661,7 @@ int main(int argc, char **argv) {
     if (system("command -v bat >/dev/null 2>&1") == 0) g_bat_cmd = "bat";
     else if (system("command -v batcat >/dev/null 2>&1") == 0) g_bat_cmd = "batcat";
 
-    const char *dbg_env0 = getenv("FASTDU_DEBUG");
+    const char *dbg_env0 = getenv("QDUX_DEBUG");
     if (dbg_env0 && dbg_env0[0]=='1') {
         const char msg0[] = "[dbg0] main start\n";
         (void)write(STDERR_FILENO, msg0, sizeof(msg0)-1);
@@ -5602,7 +5678,7 @@ int main(int argc, char **argv) {
     const char *path_args[8];
     int num_path_args = 0;
     int headless_flag = 0;
-    int debug_cache = getenv("FASTDU_DEBUG_CACHE") ? 1 : 0;
+    int debug_cache = getenv("QDUX_DEBUG_CACHE") ? 1 : 0;
     const char *export_format = NULL;
     const char *export_file = NULL;
     const char *snapshot_file = NULL;
@@ -5672,7 +5748,7 @@ int main(int argc, char **argv) {
     }
 
     if (show_version) {
-        printf("fastdu %s\n", FASTDU_VERSION);
+        printf("qdux %s\n", QDUX_VERSION);
         return 0;
     }
     if (cli_help_flag) {
@@ -5681,11 +5757,11 @@ int main(int argc, char **argv) {
     }
 
     int headless = !(isatty(STDIN_FILENO) && isatty(STDOUT_FILENO));
-    const char *env_headless = getenv("FASTDU_HEADLESS");
+    const char *env_headless = getenv("QDUX_HEADLESS");
     if (env_headless && env_headless[0] == '1') headless = 1;
     if (headless_flag) headless = 1;
     g_headless = headless;
-    int debug_all = getenv("FASTDU_DEBUG") ? 1 : 0;
+    int debug_all = getenv("QDUX_DEBUG") ? 1 : 0;
     if (debug_all) fprintf(stderr, "[dbg] args parsed: headless=%d reload=%d jobs=%d path=%s\n", headless, reload_flag, jobs_override, path_arg ? path_arg : "(cwd)");
 
     g_server_mode = server_mode;
@@ -5704,7 +5780,7 @@ int main(int argc, char **argv) {
         if (stat(root, &st_root) == 0) {
             g_root_dev = st_root.st_dev;
         }
-        load_fastduignore(root);
+        load_qduxignore(root);
     }
 
     // TTY / headless setup
@@ -5843,13 +5919,13 @@ int main(int argc, char **argv) {
         // In headless mode, if -R was requested we already rescanned; otherwise we may have loaded cache.
         // Print a short summary and exit.
         // Print on stdout
-        printf("fastdu %s\n", FASTDU_VERSION);
+        printf("qdux %s\n", QDUX_VERSION);
         printf("root: %s\n", root);
         printf("files: %llu\n", (unsigned long long)g_last_files);
         printf("size: %llu bytes\n", (unsigned long long)g_last_bytes);
         fflush(stdout);
         // Also mirror summary to stderr to avoid missing output when stdout is piped
-        fprintf(stderr, "[summary] fastdu %s\n", FASTDU_VERSION);
+        fprintf(stderr, "[summary] qdux %s\n", QDUX_VERSION);
         fprintf(stderr, "[summary] root: %s\n", root);
         fprintf(stderr, "[summary] files: %llu\n", (unsigned long long)g_last_files);
         fprintf(stderr, "[summary] size: %llu bytes\n", (unsigned long long)g_last_bytes);
@@ -5862,9 +5938,9 @@ int main(int argc, char **argv) {
         if (debug_cache || debug_all) fprintf(stderr, "[main] headless summary printed, exiting.\n");
         // In debug, exit immediately without further cleanup to avoid any hidden blockers
         if (debug_all) { free(cache_abs); _exit(0); }
-        const char *skip_free = getenv("FASTDU_SKIP_FREE_CACHE");
+        const char *skip_free = getenv("QDUX_SKIP_FREE_CACHE");
         if (skip_free && skip_free[0]=='1') {
-            if (debug_all) fprintf(stderr, "[dbg] skipping cache_free due to FASTDU_SKIP_FREE_CACHE=1\n");
+            if (debug_all) fprintf(stderr, "[dbg] skipping cache_free due to QDUX_SKIP_FREE_CACHE=1\n");
             free(cache_abs);
             _exit(0);
         }
