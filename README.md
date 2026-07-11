@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.65.0**
+- **Current version: 0.75.0**
 - **License: MIT**
 
 ---
@@ -40,6 +40,22 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.75.0 (Remote Client/Server Support & Core Reliability)
+
+### 🌐 Full SSH Remote Client/Server Protocol
+Scan, browse, and manage remote file systems via SSH directly from your local terminal.
+- **Zero-Latency Multiplexing**: Automatically sets up SSH Multiplexing (`ControlMaster`) to avoid password prompting and speed up file access and metadata syncing.
+- **Remote Operations**: Support for creating directories (`Ctrl+n`), files (`ALT+n`), renaming (`ALT+r`), and deleting (`d`) directly on remote servers.
+- **On-Demand Remote Previews**: Preview remote files (`v`) or open them using local default apps (`O`) through automatic temporary staging.
+- **Synchronized Caching**: Both local client cache and remote server cache are kept in sync automatically without full rescans.
+
+### 🛡️ Core Reliability & Safety Enhancements
+The codebase has been refactored to check memory allocations and prevent instability.
+- **Safe Reallocations**: Added checks to prevent null dereferences during task queue and list resizing (such as archive compression and directory copies).
+- **Graceful Thread Pool Teardown**: Ensures all background scanner and finalizer threads are correctly joined and cleaned up in case of folder I/O errors or early cancellation.
 
 ---
 
