@@ -38,6 +38,11 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/qdux/config.toml`.
 
+### 11. Footer Multi-riga & TUI Adattiva - v0.76.0
+- [x] **Messaggi di Stato Multi-riga:** Visualizzazione automatica a capo per messaggi di stato e log molto lunghi.
+- [x] **Layout Adattivo:** Il footer si sposta verso l'alto e la lista dei file si restringe dinamicamente se lo spazio per i messaggi aumenta, ripristinando il layout originario a scomparsa.
+- [x] **Input Prompts Wrappati:** Conflict dialogs, conferme ed input di testo supportano il wrapping a capo e l'allineamento preciso in 2D del cursore.
+
 ### 10. Funzionalità Remote (Client/Server) - v0.75.0
 - [x] **Creazione Remota (Ctrl+n / ALT+n):** Supporto per la creazione di nuove cartelle e file vuoti sul server con sincronizzazione immediata della cache locale.
 - [x] **Marcatura e Operazioni Bulk:** Supporto completo per la marcatura di file/directory remoti con calcolo corretto di dimensioni e conteggi nella UI.

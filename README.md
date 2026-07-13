@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.75.0**
+- **Current version: 0.76.0**
 - **License: MIT**
 
 ---
@@ -40,6 +40,15 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.76.0 (Dynamic Multiline Footer Messages & Adaptive TUI)
+
+### 💬 Dynamic Multiline Footer & Adaptive TUI
+Long status messages and prompts in the footer now dynamically wrap to multiple lines when the terminal window is narrow, automatically shifting the footer bar up and shrinking the list view height to fit.
+- **Adaptive Shifting**: The TUI dynamically adjusts directory lists, separators, and column views when multiline text is active, returning to its default layout once dismissed.
+- **Improved Prompts**: Conflict dialogs, delete confirmations, and name inputs all support dynamic text wrapping and precise 2D cursor alignment.
 
 ---
 

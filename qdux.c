@@ -140,7 +140,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".qdux_cache_v3"
-#define QDUX_VERSION "0.75.0"
+#define QDUX_VERSION "0.76.0"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
