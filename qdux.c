@@ -130,6 +130,8 @@ static DirView g_dv_parent;
 static DirView g_dv_preview;
 
 static void draw_status(const char *msg);
+static void redraw_all(void);
+static void clear_status(void);
 static int compute_size_col_width(const DirView *dv);
 static unsigned long long scan_dir_parallel_deep(const char *root, const char *cache_abs, Cache *cache, int threads);
 static void cache_adjust_ancestors_after_delta(Cache *c, const char *root, const char *abs_path, long long delta);
@@ -174,6 +176,13 @@ static int g_search_top = 0;
 static int g_search_filter = 0; // 0=all, 1=dirs, 2=files
 
 static int g_tree_mode = 0; // Tree view mode toggle
+
+static char g_status_msg[512] = "";
+static int g_status_msg_lines = 1;
+static const char *g_current_root = NULL;
+static const char *g_current_path = NULL;
+static const DirView *g_current_dv = NULL;
+static int g_current_top = 0;
 
 // ------------------------------
 // Remote Protocol (Simplified Text-based)
@@ -1155,14 +1164,18 @@ static char *gen_nonconflicting_path(const char *dst) {
     return NULL;
 }
 
+static void clear_status_lines(const char *msg) {
+    (void)msg;
+    clear_status();
+}
+
 static char prompt_conflict_action(const char *dst) {
-    int cols, rows; getmaxyx(stdscr, rows, cols);
     char msg[PATH_MAX + 256];
     snprintf(msg, sizeof(msg), "Conflict on '%s': [o]verwrite, [r]ename, [n]ew name, [s]kip, [O] overwrite all, [R] rename all, [S] skip all ", dst);
-    mvhline(rows-1, 0, ' ', cols);
-    mvaddnstr(rows-1, 0, msg, cols-1);
+    draw_status(msg);
     refresh();
     int ch = getch();
+    clear_status_lines(msg);
     if (ch=='o'||ch=='O') return (ch=='O') ? 'O' : 'o';
     if (ch=='r'||ch=='R') return (ch=='R') ? 'R' : 'r';
     if (ch=='n') return 'n'; // New name option
@@ -3153,8 +3166,9 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     }
 
     // --- Bottom Bar (Footer) ---
+    int footer_y = rows - 1 - g_status_msg_lines;
     attron(COLOR_PAIR(1));
-    mvhline(rows-2, 0, ' ', cols);
+    mvhline(footer_y, 0, ' ', cols);
     char totalbuf[64];
     human_size((unsigned long long)g_last_bytes, totalbuf, sizeof(totalbuf));
     char markedbuf[64] = "";
@@ -3164,7 +3178,7 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
         human_size(mt, markedbuf, sizeof(markedbuf));
     }
 
-    move(rows-2, 0);
+    move(footer_y, 0);
     attron(COLOR_PAIR(1));
     if (g_is_remote) {
         attron(COLOR_PAIR(7) | A_BOLD); addstr(" REMOTE "); 
@@ -3199,7 +3213,7 @@ static void draw_header(const char *root, const char *cur, Cache *cache) {
     int tw = (int)strlen(info_right);
     if (cols > tw + 40) {
         attron(COLOR_PAIR(1));
-        mvaddnstr(rows-2, cols - tw, info_right, tw);
+        mvaddnstr(footer_y, cols - tw, info_right, tw);
     }
 
     attron(COLOR_PAIR(1)); // Final reset
@@ -3910,7 +3924,9 @@ static void draw_column(const DirView *dv, int top, int x, int width, int is_act
     int cols, rows; getmaxyx(stdscr, rows, cols);
     int archive_offset = g_inside_archive_path ? 1 : 0;
     int y_start = (g_decorative ? 3 : 1) + archive_offset;
-    int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
+    int footer_y = rows - 1 - g_status_msg_lines;
+    int list_rows = footer_y - y_start;
+    if (list_rows < 0) list_rows = 0;
 
     for (int i = 0; i < list_rows; i++) {
         size_t idx = (size_t)top + (size_t)i;
@@ -3921,7 +3937,7 @@ static void draw_column(const DirView *dv, int top, int x, int width, int is_act
     attron(COLOR_PAIR(2));
     for (int i = 0; i < list_rows + (g_decorative?2:0); i++) {
         int vy = (g_inside_archive_path ? 2 : 1) + i;
-        if (vy < rows - 2) mvaddch(vy, x + width - 1, ACS_VLINE);
+        if (vy < footer_y) mvaddch(vy, x + width - 1, ACS_VLINE);
     }
     attroff(COLOR_PAIR(2));
 }
@@ -3986,11 +4002,13 @@ static void draw_search_results(int rows, int cols) {
 
 static void draw_list(const DirView *dv, int top) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
+    int footer_y = rows - 1 - g_status_msg_lines;
     if (!g_miller_mode || cols < 60) {
         // Standard full-width view
         int archive_offset = g_inside_archive_path ? 1 : 0;
         int y = (g_decorative ? 3 : 1) + archive_offset;
-        int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
+        int list_rows = footer_y - y;
+        if (list_rows < 0) list_rows = 0;
         int sizew = dv->sizew;
         
         // Draw column headers if decorative
@@ -4028,7 +4046,7 @@ static void draw_list(const DirView *dv, int top) {
         } else {
             // Draw centered ROOT label if we are at scan root
             int archive_offset = g_inside_archive_path ? 1 : 0;
-            int y_mid = (rows - 3) / 2 + archive_offset;
+            int y_mid = (footer_y - 1) / 2 + archive_offset;
             const char *label = "/ROOT";
             int lx = (w_parent - (int)strlen(label)) / 2;
             if (lx < 0) lx = 0;
@@ -4037,10 +4055,12 @@ static void draw_list(const DirView *dv, int top) {
             attroff(COLOR_PAIR(2) | A_BOLD);
             // Draw vertical separator manually
             attron(COLOR_PAIR(2));
-            int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
+            int y_start = (g_decorative ? 3 : 1) + archive_offset;
+            int list_rows = footer_y - y_start;
+            if (list_rows < 0) list_rows = 0;
             for (int i = 0; i < list_rows + (g_decorative?2:0); i++) {
                 int vy = (g_inside_archive_path ? 2 : 1) + i;
-                if (vy < rows - 2) mvaddch(vy, w_parent - 1, ACS_VLINE);
+                if (vy < footer_y) mvaddch(vy, w_parent - 1, ACS_VLINE);
             }
             attroff(COLOR_PAIR(2));
         }
@@ -4051,7 +4071,8 @@ static void draw_list(const DirView *dv, int top) {
             ViewEntry *ve = &dv->v[dv->selected];
             int archive_offset = g_inside_archive_path ? 1 : 0;
             int y_start = (g_decorative ? 3 : 1) + archive_offset;
-            int list_rows = rows - 3 - (g_decorative ? 2 : 0) - archive_offset;
+            int list_rows = footer_y - y_start;
+            if (list_rows < 0) list_rows = 0;
 
             if (ve->is_dir) {
                 // Clear any leftover native images before drawing directory list
@@ -4199,34 +4220,102 @@ static int maybe_rescan_hovered(DirView *dv, const char *root, Cache *cache) {
     return 0;
 }
 
+static void draw_status_msg_only(void) {
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    if (cols <= 0 || rows <= 0) return;
+    if (g_status_msg[0] == '\0') return;
+    
+    int msg_len = (int)strlen(g_status_msg);
+    int num_lines = g_status_msg_lines;
+    
+    for (int i = 0; i < num_lines; i++) {
+        int r = rows - num_lines + i;
+        mvhline(r, 0, ' ', cols);
+        int start_idx = i * cols;
+        int len_to_print = msg_len - start_idx;
+        if (len_to_print > cols) len_to_print = cols;
+        if (len_to_print > 0) {
+            mvaddnstr(r, 0, g_status_msg + start_idx, len_to_print);
+        }
+    }
+}
+
+static void redraw_all(void) {
+    if (!g_tui_active || g_server_mode) return;
+    erase();
+    if (g_current_root && g_current_path) {
+        draw_header(g_current_root, g_current_path, &g_cache);
+    }
+    if (g_current_dv) {
+        draw_list(g_current_dv, g_current_top);
+    }
+    draw_status_msg_only();
+}
+
 static void draw_status(const char *msg) {
-    int cols; int rows; getmaxyx(stdscr, rows, cols);
-    mvhline(rows-1, 0, ' ', cols);
-    mvaddnstr(rows-1, 0, msg, cols-1);
-    // Note: no pause here; message will be overwritten on next refresh
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    if (cols <= 0 || rows <= 0) return;
+    
+    strncpy(g_status_msg, msg, sizeof(g_status_msg) - 1);
+    g_status_msg[sizeof(g_status_msg) - 1] = '\0';
+    
+    int msg_len = (int)strlen(g_status_msg);
+    int num_lines = (msg_len + cols - 1) / cols;
+    if (num_lines < 1) num_lines = 1;
+    if (num_lines > rows) num_lines = rows;
+    g_status_msg_lines = num_lines;
+    
+    redraw_all();
+    refresh();
+}
+
+static void clear_status(void) {
+    g_status_msg[0] = '\0';
+    g_status_msg_lines = 1;
+    redraw_all();
+    refresh();
 }
 
 static int prompt_input(char *buf, size_t bufsz, const char *label) {
     int cols, rows; getmaxyx(stdscr, rows, cols);
     curs_set(1);
-    mvhline(rows-1, 0, ' ', cols);
-    mvaddnstr(rows-1, 0, label, cols-1);
-    int x_start = (int)strlen(label);
     
     size_t len = strlen(buf);
     size_t cursor_pos = len; // Initial cursor at the end
     
     while (1) {
-        // Redraw line
-        mvhline(rows-1, x_start, ' ', cols - x_start);
-        mvaddstr(rows-1, x_start, buf);
-        move(rows-1, x_start + (int)cursor_pos);
+        buf[len] = '\0';
+        getmaxyx(stdscr, rows, cols);
+        if (cols <= 0 || rows <= 0) break;
+        
+        char full_msg[PATH_MAX + 512];
+        snprintf(full_msg, sizeof(full_msg), "%s%s", label, buf);
+        
+        strncpy(g_status_msg, full_msg, sizeof(g_status_msg) - 1);
+        g_status_msg[sizeof(g_status_msg) - 1] = '\0';
+        
+        int full_len = (int)strlen(g_status_msg);
+        int num_lines = (full_len + cols - 1) / cols;
+        if (num_lines < 1) num_lines = 1;
+        if (num_lines > rows) num_lines = rows;
+        g_status_msg_lines = num_lines;
+        
+        redraw_all();
+        
+        int cursor_idx = (int)strlen(label) + (int)cursor_pos;
+        int cursor_row = rows - num_lines + (cursor_idx / cols);
+        int cursor_col = cursor_idx % cols;
+        if (cursor_row >= rows) cursor_row = rows - 1;
+        if (cursor_col >= cols) cursor_col = cols - 1;
+        
+        move(cursor_row, cursor_col);
         refresh();
         
         int ch = getch();
         if (ch == 27) { // ESC
             buf[0] = '\0';
             curs_set(0);
+            clear_status();
             return -1; 
         } else if (ch == 10 || ch == 13 || ch == KEY_ENTER) { // ENTER
             break;
@@ -4260,6 +4349,7 @@ static int prompt_input(char *buf, size_t bufsz, const char *label) {
     }
     buf[len] = '\0';
     curs_set(0);
+    clear_status();
     
     // Trim trailing spaces
     while (len > 0 && (buf[len-1] == ' ' || buf[len-1] == '\t' || buf[len-1] == '\r')) { buf[--len] = '\0'; }
@@ -4851,10 +4941,11 @@ static void show_preview(const char *path) {
 
 static int confirm_delete_prompt(const char *name, int is_dir) {
     char prompt[PATH_MAX + 128];
-snprintf(prompt, sizeof(prompt), "Delete %c '%s'? [y/N] ", is_dir ? 'D' : 'F', name);
+    snprintf(prompt, sizeof(prompt), "Delete %c '%s'? [y/N] ", is_dir ? 'D' : 'F', name);
     draw_status(prompt);
     refresh();
     int ch = getch();
+    clear_status_lines(prompt);
     return (ch == 'y' || ch == 'Y');
 }
 
@@ -6030,12 +6121,19 @@ int main(int argc, char **argv) {
         // Handle automatic updates (if any) and trigger redraw if needed
         (void)maybe_rescan_hovered(&dv, root, &g_cache);
 
-        erase();
-        draw_header(root, current, &g_cache);
-        draw_list(&dv, top);
+        g_current_root = root;
+        g_current_path = current;
+        g_current_dv = &dv;
+        g_current_top = top;
+
+        redraw_all();
         refresh();
 
         ch = getch();
+        if (g_status_msg[0] != '\0') {
+            g_status_msg[0] = '\0';
+            g_status_msg_lines = 1;
+        }
         if (ch == 'q' || ch == 'Q') break;
         else if (ch == 27) { // ESC or ALT sequence
             nodelay(stdscr, TRUE);
@@ -7016,6 +7114,7 @@ draw_status("No items marked.");
                 // Confirm move
                 char prompt[PATH_MAX+128]; snprintf(prompt, sizeof(prompt), "Move %zu elements in '%s'? [y/N] ", n, current);
                 draw_status(prompt); refresh(); int chc=getch();
+                clear_status_lines(prompt);
                 if (chc=='y'||chc=='Y'){
                     char conflict_all_m = 0; char conflict_action_all_m = 0; // 'o','r','s'
                     for (size_t i=0;i<n;i++) {
@@ -7100,6 +7199,7 @@ draw_status("No items marked.");
                 char totbuf[64]; human_size(total, totbuf, sizeof(totbuf));
                 snprintf(prompt, sizeof(prompt), "Copy %zu elements in '%s' (tot %s)? [y/N] ", n, current, totbuf);
                 draw_status(prompt); refresh(); int chc=getch();
+                clear_status_lines(prompt);
                 if (chc=='y' || chc=='Y') {
                     CopyUI ui = { .enabled = 1, .total = total, .done = 0, .phase = "Copy" };
                     clock_gettime(CLOCK_MONOTONIC, &ui.last_draw);
@@ -7194,6 +7294,7 @@ draw_status("No items marked.");
                 }
                 char prompt[256]; snprintf(prompt,sizeof(prompt),"Delete %zu elements (%zu dir, %zu file)? [y/N] ", n, cnt_dir, cnt_file);
                 draw_status(prompt); refresh(); int chc=getch();
+                clear_status_lines(prompt);
                 if (chc=='y'||chc=='Y'){
                     for (size_t i=0; i < n; i++){
                         const char *p = list[i];
