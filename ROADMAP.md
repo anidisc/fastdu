@@ -38,6 +38,12 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/qdux/config.toml`.
 
+### 12. Gestione degli Elementi Marcati (Overlay View) - v0.77.0
+- [x] **Lista degli Elementi Marcati (L):** Visualizzazione di un overlay che elenca tutti i file/directory attualmente marcati nel programma.
+- [x] **Deselezione Interattiva (Space / d / u):** Possibilità di scorrere la lista e rimuovere selettivamente la marcatura degli elementi selezionati.
+- [x] **Rimozione Globale (c / C):** Tasto per rimuovere contemporaneamente tutte le marcature con aggiornamento automatico dei contatori della UI.
+- [x] **Troncamento Intelligente dei Path:** Visualizzazione pulita dei percorsi assoluti lunghi tramite troncamento iniziale (`.../percorso/file`).
+
 ### 11. Footer Multi-riga & TUI Adattiva - v0.76.0
 - [x] **Messaggi di Stato Multi-riga:** Visualizzazione automatica a capo per messaggi di stato e log molto lunghi.
 - [x] **Layout Adattivo:** Il footer si sposta verso l'alto e la lista dei file si restringe dinamicamente se lo spazio per i messaggi aumenta, ripristinando il layout originario a scomparsa.

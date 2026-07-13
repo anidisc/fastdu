@@ -140,7 +140,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".qdux_cache_v3"
-#define QDUX_VERSION "0.76.0"
+#define QDUX_VERSION "0.77.0"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -3454,6 +3454,98 @@ static void show_extension_view(const DirView *dv) {
     free(entries);
 }
 
+static void show_marked_view(void) {
+    if (g_marks.n == 0) {
+        draw_status("No items marked.");
+        return;
+    }
+
+    int cols, rows; getmaxyx(stdscr, rows, cols);
+    int w = cols - 12; if (w < 40) w = cols - 4; if (w < 20) w = cols;
+    int h = rows - 10; if (h < 10) h = rows - 4; if (h < 5) h = rows;
+    int x = (cols - w) / 2; int y = (rows - h) / 2;
+    WINDOW *win = newwin(h, w, y, x);
+    if (!win) return;
+    keypad(win, TRUE);
+
+    int off = 0;
+    int selected = 0;
+
+    for (;;) {
+        werase(win);
+        box(win, 0, 0);
+        wattron(win, A_REVERSE | A_BOLD);
+        mvwaddnstr(win, 0, 2, " Marked Items - [Space/d/u] Unmark | [c/C] Unmark All | [q/ESC] Exit ", w - 4);
+        wattroff(win, A_REVERSE | A_BOLD);
+
+        size_t n = g_marks.n;
+        if (n == 0) {
+            mvwprintw(win, h / 2, (w - 16) / 2 > 0 ? (w - 16) / 2 : 1, "No items marked.");
+            wrefresh(win);
+            int ch = wgetch(win);
+            (void)ch;
+            break;
+        }
+
+        if (selected >= (int)n) selected = (int)n - 1;
+        if (selected < 0) selected = 0;
+        if (off > selected) off = selected;
+        if (off + (h - 2) <= selected) off = selected - (h - 2) + 1;
+
+        int view_lines = h - 2;
+        for (int i = 0; i < view_lines; i++) {
+            size_t idx = (size_t)off + (size_t)i;
+            if (idx >= n) break;
+
+            int is_sel = ((int)idx == selected);
+            if (is_sel) {
+                wattron(win, A_REVERSE | A_BOLD);
+            }
+            mvwhline(win, 1 + i, 1, ' ', w - 2);
+            int max_w = w - 4;
+            const char *path = g_marks.paths[idx];
+            int len = (int)strlen(path);
+            if (len <= max_w) {
+                mvwaddnstr(win, 1 + i, 2, path, max_w);
+            } else {
+                char truncated[1024];
+                snprintf(truncated, sizeof(truncated), "...%s", path + (len - max_w + 3));
+                mvwaddnstr(win, 1 + i, 2, truncated, max_w);
+            }
+            if (is_sel) {
+                wattroff(win, A_REVERSE | A_BOLD);
+            }
+        }
+
+        wrefresh(win);
+        int ch = wgetch(win);
+        if (ch == 'q' || ch == 'Q' || ch == 27 || ch == 'L') {
+            break;
+        }
+        else if (ch == KEY_UP || ch == 'k') {
+            if (selected > 0) selected--;
+        }
+        else if (ch == KEY_DOWN || ch == 'j') {
+            if (selected + 1 < (int)n) selected++;
+        }
+        else if (ch == ' ' || ch == 'd' || ch == 'u') {
+            char *path_to_remove = xstrdup(g_marks.paths[selected]);
+            markset_remove(&g_marks, path_to_remove);
+            free(path_to_remove);
+            if (selected >= (int)g_marks.n && g_marks.n > 0) {
+                selected = (int)g_marks.n - 1;
+            }
+        }
+        else if (ch == 'c' || ch == 'C') {
+            markset_clear(&g_marks);
+            selected = 0;
+            off = 0;
+        }
+    }
+
+    delwin(win);
+}
+
 typedef struct {
     int is_header;
     int group_id;
@@ -4504,6 +4596,7 @@ static void show_help(void) {
         "  Ctrl-T - reset all filters and search queries",
         "  SPACE - mark/unmark file/dir",
         "  Ctrl-A - select/deselect all in view",
+        "  L - list marked files (and deselect them)",
         "  m - move marked to current directory",
         "  c - copy marked to current directory (with progress)",
         "  d - delete marked (if any) else delete selected",
@@ -6964,6 +7057,11 @@ int list_rows = rows - 3 - (g_decorative ? 2 : 0);
             }
         } else if (ch == 'E') {
             show_extension_view(&dv);
+        } else if (ch == 'L') {
+            show_marked_view();
+            view_free(&dv);
+            build_dir_view(current, root, &g_cache, &dv);
+            if (g_miller_mode) update_miller_columns(current, root, &g_cache, &dv);
         } else if (ch == 'U') {
             if (g_inside_archive_path) {
                 draw_status("Duplicate finder is not supported inside archives.");

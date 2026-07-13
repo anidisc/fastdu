@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.76.0**
+- **Current version: 0.77.0**
 - **License: MIT**
 
 ---
@@ -40,6 +40,16 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.77.0 (Interactive Marked Files List View)
+
+### 📌 Interactive Marked Files List
+A new interactive overlay view allows you to see and manage all marked files instantly by pressing `L`.
+- **Interactive List**: Scroll through all marked items and selectively deselect (unmark) files using `Space`, `d`, or `u`.
+- **Clear All**: Deselect all marked items instantly with `c` or `C`.
+- **Path Truncation**: Smart front-truncation ensures long absolute file paths remain readable.
 
 ---
 
