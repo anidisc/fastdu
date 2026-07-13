@@ -26,6 +26,7 @@ L'interfaccia terminale offre diverse modalità di visualizzazione:
 * **Tree View (Modalità Albero):** Espande e comprime i nodi mantenendo l'indentazione.
 * **Miller Columns (Colonne Ranger):** Visualizzazione affiancata classica (Cartella Genitore $\rightarrow$ Selezione Attuale $\rightarrow$ Anteprima Contenuto).
 * **Gestione Temi & Colori:** Configurazione flessibile di colori e temi preimpostati (es. Dracula, TokyoNight, Light, Pastel).
+* **Footer Multi-riga & Layout Adattivo:** I messaggi di stato ed i prompt di inserimento lunghi vengono automaticamente mandati a capo su più righe. La TUI sposta verso l'alto la barra del footer e riduce l'altezza della lista dei file per adattarsi, ripristinando il layout originario a comparsa.
 
 ### 1.4 Gestione Archivi
 Integrato con `libarchive` per comprimere file o cartelle selezionati in formato `.zip` (`zip_compress_items`) ed estrarre archivi sul posto (`archive_extract_to`). Durante l'estrazione o compressione, la barra di stato mostra l'avanzamento in tempo reale leggendo il descrittore del file compresso tramite `lseek`.
@@ -91,6 +92,7 @@ L'interfaccia interattiva supporta i seguenti comandi da tastiera:
 |---|---|
 | `SPAZIO` | Seleziona/deseleziona l'elemento corrente per operazioni di massa (Mark). |
 | `Ctrl + A` | Seleziona o deseleziona tutti gli elementi della lista corrente. |
+| `L` | Visualizza la lista interattiva degli elementi marcati (permettendone la rimozione singola o globale). |
 | `m` | Sposta tutti gli elementi marcati nella cartella attuale. |
 | `c` | Copia tutti gli elementi marcati nella cartella attuale (mostrando la percentuale di avanzamento). |
 | `d` | Elimina gli elementi marcati o, in alternativa, l'elemento attualmente evidenziato. |
