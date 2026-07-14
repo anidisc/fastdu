@@ -31,3 +31,9 @@ gdu/
 # Website (local landing page)
 html/
 remote_feat.html
+
+# Win64 build temporary paths
+win64/pdcurses/
+win64/qdux.exe
+win64/*.obj
+win64/*.lib
