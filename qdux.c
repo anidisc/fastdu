@@ -73,6 +73,13 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+#ifndef A_ITALIC
+#ifdef NCURSES_BITS
+#define A_ITALIC NCURSES_BITS(1U, 23)
+#else
+#define A_ITALIC 0
+#endif
+#endif
 
 // Forward declaration for TUI active flag used before its definition
 static volatile sig_atomic_t g_tui_active;
@@ -3871,7 +3878,15 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
     }
 
     // 3. Type
+    if (!is_sel) {
+        if (ve->is_dir) attron(A_BOLD);
+        else attron(A_DIM | A_ITALIC);
+    }
     mvaddch(y, type_col, ve->is_dir ? 'D' : 'F');
+    if (!is_sel) {
+        if (ve->is_dir) attroff(A_BOLD);
+        else attroff(A_DIM | A_ITALIC);
+    }
 
     // 4. Graph bar (only in normal mode, if enabled)
     int bar_w = (g_show_graph && !g_miller_mode) ? 12 : 0;
@@ -3898,7 +3913,6 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
         mvaddstr(y, name_col + indent - 2, "└ ");
     }
     if (g_use_nerd_fonts) mvaddstr(y, name_col + indent, get_icon(ve->name, ve->is_dir));
-    if (ve->is_dir) attron(A_BOLD);
     if (g_tree_mode && ve->is_dir) {
         mvaddch(y, name_col + indent + icon_w, ve->expanded ? '-' : '+');
         mvaddch(y, name_col + indent + icon_w + 1, ' ');
@@ -3911,9 +3925,17 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
     int name_max = (info_w > 0) ? (info_col - (name_col + indent + icon_w) - 1) : (x + width - (name_col + indent + icon_w) - 1);
 
     if (name_max > 0) {
+        if (!is_sel) {
+            if (ve->is_dir) attron(A_BOLD);
+            else attron(A_DIM | A_ITALIC);
+        }
         if (g_inside_archive_path && !is_sel) attron(COLOR_PAIR(2));
         draw_truncated_name(y, name_col + indent + icon_w, ve->name, name_max);
         if (g_inside_archive_path && !is_sel) { attroff(COLOR_PAIR(2)); attron(COLOR_PAIR(base_pair)); }
+        if (!is_sel) {
+            if (ve->is_dir) attroff(A_BOLD);
+            else attroff(A_DIM | A_ITALIC);
+        }
     }
 
     // 6. Info Column
@@ -3935,7 +3957,6 @@ static void draw_list_item(const ViewEntry *ve, int y, int x, int width, int is_
 
     if (is_sel) attroff(COLOR_PAIR(highlight_pair) | A_BOLD);
     else attroff(COLOR_PAIR(base_pair));
-    if (ve->is_dir) attroff(A_BOLD);
 }
 
 static void draw_text_preview_column(const char *path, int y, int x, int width, int height) {
@@ -4081,8 +4102,14 @@ static void draw_search_results(int rows, int cols) {
         SearchResult *res = &g_search_results[idx];
 
         if (is_sel) attron(COLOR_PAIR(8) | A_BOLD);
-        else if (res->is_dir) attron(COLOR_PAIR(3));
-        else attron(COLOR_PAIR(4));
+        else if (res->is_dir) attron(COLOR_PAIR(3) | A_BOLD);
+        else {
+#ifdef A_ITALIC
+            attron(COLOR_PAIR(4) | A_DIM | A_ITALIC);
+#else
+            attron(COLOR_PAIR(4) | A_DIM);
+#endif
+        }
 
         mvhline(y, 0, ' ', cols);
         char szbuf[32]; human_size(res->size, szbuf, sizeof(szbuf));
@@ -4103,8 +4130,14 @@ static void draw_search_results(int rows, int cols) {
         }
 
         if (is_sel) attroff(COLOR_PAIR(8) | A_BOLD);
-        else if (res->is_dir) attroff(COLOR_PAIR(3));
-        else attroff(COLOR_PAIR(4));
+        else if (res->is_dir) attroff(COLOR_PAIR(3) | A_BOLD);
+        else {
+#ifdef A_ITALIC
+            attroff(COLOR_PAIR(4) | A_DIM | A_ITALIC);
+#else
+            attroff(COLOR_PAIR(4) | A_DIM);
+#endif
+        }
     }
     
     mvhline(rows-1, 0, ' ', cols);
