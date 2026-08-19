@@ -7,8 +7,8 @@
 # Choose one of the built-in color presets.
 # Current theme name is displayed in the bottom-right corner (T:[theme]).
 #
-# Valid values: "dark" (default), "dracula", "tokyonight", "light", "pastel"
-theme = "dracula"
+# Valid values: "neutral" (default), "dark", "dracula", "tokyonight", "light", "pastel"
+theme = "neutral"
 
 # ---------------------------------------------------------
 # CUSTOM COLOR OVERRIDES

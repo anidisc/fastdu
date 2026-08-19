@@ -25,7 +25,7 @@ La scansione parallela avviene nella funzione `scan_dir_parallel_deep`:
 L'interfaccia terminale offre diverse modalità di visualizzazione:
 * **Tree View (Modalità Albero):** Espande e comprime i nodi mantenendo l'indentazione.
 * **Miller Columns (Colonne Ranger):** Visualizzazione affiancata classica (Cartella Genitore $\rightarrow$ Selezione Attuale $\rightarrow$ Anteprima Contenuto).
-* **Gestione Temi & Colori:** Configurazione flessibile di colori e temi preimpostati (es. Dracula, TokyoNight, Light, Pastel).
+* **Gestione Temi & Colori:** Configurazione flessibile di colori e temi preimpostati (es. Neutral di default, Dark, Dracula, TokyoNight, Light, Pastel).
 * **Footer Multi-riga & Layout Adattivo:** I messaggi di stato ed i prompt di inserimento lunghi vengono automaticamente mandati a capo su più righe. La TUI sposta verso l'alto la barra del footer e riduce l'altezza della lista dei file per adattarsi, ripristinando il layout originario a comparsa.
 
 ### 1.4 Gestione Archivi
@@ -127,7 +127,7 @@ Il programma cerca il file di configurazione in `~/.config/qdux/config.toml`. Un
 
 ```toml
 # Scelta del tema estetico predefinito
-theme = "dracula" # Opzioni: dark, dracula, tokyonight, light, pastel
+theme = "neutral" # Opzioni: neutral (default), dark, dracula, tokyonight, light, pastel
 
 # Editor di testo predefinito (sovrascrive $EDITOR)
 editor = "nano"

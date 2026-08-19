@@ -2,7 +2,7 @@
 
 A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel scanning and an on-disk cache.
 
-- **Current version: 0.77.0**
+- **Current version: 0.78.0**
 - **License: MIT**
 
 ---
@@ -22,7 +22,7 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **Duplicate Finder**: Identify and remove identical files safely. Now with progress bars and ESC-to-cancel support (Press `U`).
 - **Archive Exploration**: Browse inside `.zip`, `.tar`, `.7z`, `.iso` and more as if they were directories (Press `Enter` to enter, `Backspace` to exit, `ESC` to cancel).
 - **Snapshot Comparison (Diff Mode)**: Compare your current disk usage against a reference baseline (Press `Y`).
-- **Theme Presets**: Switch between Dracula, Tokyo Night, Pastel, Light, and Dark themes (Press `K`).
+- **Theme Presets**: Switch between Neutral (default monochrome), Dark, Dracula, Tokyo Night, Light, and Pastel themes (Press `K`).
 - **Tree View Mode**: Toggle a hierarchical view of your directories (Press `A`).
 - **Full Mouse Support**: Selection, double-click to enter, right-click to go back, and scroll wheel support.
 - **Navigable Breadcrumbs**: Clickable path in the header for instant navigation to parent directories.
@@ -40,6 +40,16 @@ A fast terminal UI (ncurses) disk-usage explorer written in C, with parallel sca
 - **System Integration**: Open files/folders directly with the system default application (Press `O`).
 - **Mount-point Awareness**: Option to stay on a single filesystem (`-x` / `--one-file-system`).
 - **Robust TUI**: Improved visibility with occupation bars, smart name truncation, and dynamic resize support.
+
+---
+
+## What’s new in 0.78.0 (Neutral Monochrome Default Theme)
+
+### 🎨 Neutral / Monochrome Default Theme
+Introduced a clean, high-contrast monochrome gray theme that is now the default across all environments.
+- **Universal Readability**: Avoids poor contrast on heterogeneous terminal color palettes, monochrome screens, serial consoles, and minimal TTYs.
+- **Clean Reverse Video Layout**: High-contrast black-on-white header/footer bars and clear inverse highlight for active selections.
+- **Easy Theme Switching**: Quickly switch back to colored themes (*Dark*, *Dracula*, *Tokyo Night*, *Light*, *Pastel*) anytime with `K` or via `~/.config/qdux/config.toml`.
 
 ---
 
@@ -243,7 +253,7 @@ Analyze how your disk usage has changed over time.
 
 ### 🎨 Theme Presets
 Instantly change the look of the TUI.
-- **Cycle Themes**: Press `K` to cycle through built-in presets: *Dark*, *Dracula*, *Tokyo Night*, *Light*, and *Pastel*.
+- **Cycle Themes**: Press `K` to cycle through built-in presets: *Neutral* (default), *Dark*, *Dracula*, *Tokyo Night*, *Light*, and *Pastel*.
 - **Persistence**: Set your favorite theme in the config file (`theme = "tokyonight"`).
 
 ## What’s new in 0.46.0 (Hierarchical Exploration)

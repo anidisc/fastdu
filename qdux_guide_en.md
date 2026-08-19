@@ -25,7 +25,7 @@ Parallel scanning is implemented in the `scan_dir_parallel_deep` function:
 The terminal interface offers several display modes:
 * **Tree View:** Expands and collapses nodes while keeping the indentation hierarchy.
 * **Miller Columns (Ranger-style):** Classic side-by-side view (Parent Directory $\rightarrow$ Current Selection $\rightarrow$ Content Preview).
-* **Theme & Color Management:** Flexible customization of colors and preconfigured themes (e.g. Dracula, TokyoNight, Light, Pastel).
+* **Theme & Color Management:** Flexible customization of colors and preconfigured themes (e.g. Neutral by default, Dark, Dracula, TokyoNight, Light, Pastel).
 * **Multiline Footer & Adaptive Layout:** Long status messages and input prompts automatically wrap to multiple lines. The TUI dynamically shifts the footer bar up and shrinks the list view height to adapt, returning to the default single-line state once dismissed.
 
 ### 1.4 Archive Management
@@ -127,7 +127,7 @@ The program searches for its configuration file in `~/.config/qdux/config.toml`.
 
 ```toml
 # Default theme selection
-theme = "dracula" # Options: dark, dracula, tokyonight, light, pastel
+theme = "neutral" # Options: neutral (default), dark, dracula, tokyonight, light, pastel
 
 # Default text editor (overrides $EDITOR)
 editor = "nano"

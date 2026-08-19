@@ -140,7 +140,7 @@ static void cache_remove_prefix(Cache *c, const char *prefix);
 static int is_textual_file(const char *path);
 
 #define CACHE_FILENAME ".qdux_cache_v3"
-#define QDUX_VERSION "0.77.0"
+#define QDUX_VERSION "0.78.0"
 
 static int g_global_search_mode = 0;
 static int g_server_mode = 0; // Se attivo, invia cache su stdout e ascolta comandi
@@ -565,7 +565,7 @@ typedef struct {
 } AppConfig;
 
 static AppConfig g_config;
-static const char *g_themes[] = {"dark", "dracula", "tokyonight", "light", "pastel"};
+static const char *g_themes[] = {"neutral", "dark", "dracula", "tokyonight", "light", "pastel"};
 static int g_current_theme_idx = 0;
 
 static int g_diff_mode = 0;
@@ -596,15 +596,15 @@ static short parse_color(const char *name) {
 }
 
 static void load_default_config(void) {
-    // Default Color Pairs
-    g_config.pairs[1][0] = COLOR_BLACK;  g_config.pairs[1][1] = COLOR_BLUE;   // header
-    g_config.pairs[2][0] = COLOR_BLUE;   g_config.pairs[2][1] = -1;           // accent
-    g_config.pairs[3][0] = COLOR_CYAN;   g_config.pairs[3][1] = -1;           // dirs
-    g_config.pairs[4][0] = COLOR_WHITE;  g_config.pairs[4][1] = -1;           // files
-    g_config.pairs[5][0] = COLOR_GREEN;  g_config.pairs[5][1] = -1;           // size small
-    g_config.pairs[6][0] = COLOR_YELLOW; g_config.pairs[6][1] = -1;           // size med
-    g_config.pairs[7][0] = COLOR_RED;    g_config.pairs[7][1] = -1;           // size large
-    g_config.pairs[8][0] = COLOR_YELLOW; g_config.pairs[8][1] = COLOR_BLUE;   // highlight
+    // Default Color Pairs (Neutral / Monochrome Gray theme)
+    g_config.pairs[1][0] = COLOR_BLACK;  g_config.pairs[1][1] = COLOR_WHITE; // header / footer bar
+    g_config.pairs[2][0] = COLOR_WHITE;  g_config.pairs[2][1] = -1;          // accent / borders
+    g_config.pairs[3][0] = COLOR_WHITE;  g_config.pairs[3][1] = -1;          // dirs
+    g_config.pairs[4][0] = COLOR_WHITE;  g_config.pairs[4][1] = -1;          // files
+    g_config.pairs[5][0] = COLOR_WHITE;  g_config.pairs[5][1] = -1;          // size small
+    g_config.pairs[6][0] = COLOR_WHITE;  g_config.pairs[6][1] = -1;          // size med
+    g_config.pairs[7][0] = COLOR_WHITE;  g_config.pairs[7][1] = -1;          // size large
+    g_config.pairs[8][0] = COLOR_BLACK;  g_config.pairs[8][1] = COLOR_WHITE; // highlight / selection
     g_config.editor[0] = '\0'; // default empty
     g_config.num_associations = 0;
 }
@@ -626,7 +626,28 @@ static void apply_theme(const char *name) {
         }
     }
 
-    if (strcasecmp(name, "dracula") == 0) {
+    if (strcasecmp(name, "neutral") == 0 || strcasecmp(name, "mono") == 0 ||
+        strcasecmp(name, "monochrome") == 0 || strcasecmp(name, "gray") == 0 ||
+        strcasecmp(name, "grey") == 0 || strcasecmp(name, "classic") == 0) {
+        g_config.pairs[1][0] = COLOR_BLACK; g_config.pairs[1][1] = COLOR_WHITE; // header
+        g_config.pairs[2][0] = COLOR_WHITE; g_config.pairs[2][1] = -1;          // accent
+        g_config.pairs[3][0] = COLOR_WHITE; g_config.pairs[3][1] = -1;          // dirs
+        g_config.pairs[4][0] = COLOR_WHITE; g_config.pairs[4][1] = -1;          // files
+        g_config.pairs[5][0] = COLOR_WHITE; g_config.pairs[5][1] = -1;          // size s
+        g_config.pairs[6][0] = COLOR_WHITE; g_config.pairs[6][1] = -1;          // size m
+        g_config.pairs[7][0] = COLOR_WHITE; g_config.pairs[7][1] = -1;          // size l
+        g_config.pairs[8][0] = COLOR_BLACK; g_config.pairs[8][1] = COLOR_WHITE; // highlight
+        g_current_theme_idx = 0;
+    } else if (strcasecmp(name, "dark") == 0) {
+        g_config.pairs[1][0] = COLOR_BLACK;  g_config.pairs[1][1] = COLOR_BLUE;   // header
+        g_config.pairs[2][0] = COLOR_BLUE;   g_config.pairs[2][1] = -1;           // accent
+        g_config.pairs[3][0] = COLOR_CYAN;   g_config.pairs[3][1] = -1;           // dirs
+        g_config.pairs[4][0] = COLOR_WHITE;  g_config.pairs[4][1] = -1;           // files
+        g_config.pairs[5][0] = COLOR_GREEN;  g_config.pairs[5][1] = -1;           // size small
+        g_config.pairs[6][0] = COLOR_YELLOW; g_config.pairs[6][1] = -1;           // size med
+        g_config.pairs[7][0] = COLOR_RED;    g_config.pairs[7][1] = -1;           // size large
+        g_config.pairs[8][0] = COLOR_YELLOW; g_config.pairs[8][1] = COLOR_BLUE;   // highlight
+    } else if (strcasecmp(name, "dracula") == 0) {
         g_config.pairs[1][0] = COLOR_MAGENTA; g_config.pairs[1][1] = COLOR_BLACK; // header
         g_config.pairs[2][0] = COLOR_CYAN;    g_config.pairs[2][1] = -1;          // accent
         g_config.pairs[3][0] = COLOR_BLUE;    g_config.pairs[3][1] = -1;          // dirs
@@ -662,7 +683,7 @@ static void apply_theme(const char *name) {
         g_config.pairs[6][0] = COLOR_GREEN;   g_config.pairs[6][1] = -1;
         g_config.pairs[7][0] = COLOR_YELLOW;  g_config.pairs[7][1] = -1;
         g_config.pairs[8][0] = COLOR_BLACK;   g_config.pairs[8][1] = COLOR_GREEN;
-    } else { // default dark
+    } else { // default neutral
         load_default_config();
         g_current_theme_idx = 0;
     }
@@ -4602,7 +4623,7 @@ static void show_help(void) {
         "  d - delete marked (if any) else delete selected",
         "  o - toggle sort key (size/name/mtime/delta)",
         "  s - toggle sort order (asc/desc)",
-        "  K - cycle theme presets (Dracula, TokyoNight, etc.)",
+        "  K - cycle theme presets (Neutral, Dark, Dracula, TokyoNight, etc.)",
         "  Y - take baseline snapshot & toggle DIFF mode",
         "  I - size display: numeric → percent → off",
         "  i - info column (mtime → owner+perm → hidden)",

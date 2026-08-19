@@ -38,6 +38,11 @@ Attualmente il tool scansiona tutto ciò che incontra (tranne i symlink).
 - [x] **Supporto Nerd Fonts:** Opzione per mostrare icone specifiche per tipo di file (es. cartella, immagine, sorgente C) per una visualizzazione più moderna.
 - [x] **File di Configurazione:** Permettere la personalizzazione di colori e tasti tramite un file `~/.config/qdux/config.toml`.
 
+### 13. Tema Neutro / Monocromatico di Default - v0.78.0
+- [x] **Tema Neutro di Default:** Introdotto un tema grigio neutro/monocromatico ad alto contrasto impostato come predefinito per garantire la massima leggibilità su qualsiasi terminale, display monocromatico o console seriale.
+- [x] **Preset e Alias:** Supporto per `neutral`, `mono`, `monochrome`, `gray`, `grey`, `classic` e facile switch tra i temi con il tasto `K`.
+- [x] **Configurazione Aggiornata:** Esempio `config.toml.example` aggiornato con il tema `neutral` di default.
+
 ### 12. Gestione degli Elementi Marcati (Overlay View) - v0.77.0
 - [x] **Lista degli Elementi Marcati (L):** Visualizzazione di un overlay che elenca tutti i file/directory attualmente marcati nel programma.
 - [x] **Deselezione Interattiva (Space / d / u):** Possibilità di scorrere la lista e rimuovere selettivamente la marcatura degli elementi selezionati.
